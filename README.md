@@ -8,6 +8,8 @@ Port of the Fabric 1.21.1 edition of **Explainstone / Songmelyn / Broadcast Tran
 * Imported audio is uploaded in chunks and stored inside the world save
   (`<world>/explainstone/audio/<sha1>.ogg`), then streamed to nearby clients on demand.
 * Client-side OpenAL playback engine, independent of resource packs.
+* Directional playback: decoded audio is mono-downmixed and positioned in the world,
+  so the stereo image follows where the speaker actually is (turn around and left/right swap).
 
 ## Build
 

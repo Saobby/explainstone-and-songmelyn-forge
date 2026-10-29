@@ -40,6 +40,7 @@ import org.slf4j.LoggerFactory;
 
 import java.io.InputStream;
 import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -94,7 +95,28 @@ public final class SpeakerAudio {
     private SpeakerAudio() {
     }
 
+    // ------------------------------------------------------------ OpenAL 上下文 喵
+    /**
+     * Minecraft 的声音引擎会在之后把它的 OpenAL 上下文设为当前上下文。
+     * 我们每次操作自己的音源前都要切回自己的上下文，结束后再恢复，
+     * 否则 AL 调用会作用到 MC 的音源/监听器上，声音也不会按我们的坐标做空间化 喵
+     */
+    private static long pushContext() {
+        long previous = ALC10.alcGetCurrentContext();
+        if (previous != context) {
+            ALC10.alcMakeContextCurrent(context);
+        }
+        return previous;
+    }
+
+    private static void popContext(long previous) {
+        if (previous != context) {
+            ALC10.alcMakeContextCurrent(previous);
+        }
+    }
+
     public static void init() {
+        long previous = ALC10.alcGetCurrentContext();
         try {
             device = ALC10.alcOpenDevice((ByteBuffer) null);
             if (device == 0L) {
@@ -113,6 +135,11 @@ public final class SpeakerAudio {
             LOGGER.warn("初始化 OpenAL 失败: {}", t.toString());
             available = false;
             warnNoDevice = true;
+        } finally {
+            // 不占着当前上下文，MC 的声音引擎还要初始化它自己的 喵
+            if (ALC10.alcGetCurrentContext() == context) {
+                ALC10.alcMakeContextCurrent(previous);
+            }
         }
     }
 
@@ -121,16 +148,21 @@ public final class SpeakerAudio {
         if (!available) {
             return;
         }
-        for (Voice voice : VOICES.values()) {
-            voice.dispose();
+        long previous = pushContext();
+        try {
+            for (Voice voice : VOICES.values()) {
+                voice.dispose();
+            }
+            VOICES.clear();
+            speakers = List.of();
+            transmitters = List.of();
+            BROADCASTS.clear();
+            BROADCAST_START.clear();
+            TRACK_START.clear();
+            REQUESTED.clear();
+        } finally {
+            popContext(previous);
         }
-        VOICES.clear();
-        speakers = List.of();
-        transmitters = List.of();
-        BROADCASTS.clear();
-        BROADCAST_START.clear();
-        TRACK_START.clear();
-        REQUESTED.clear();
     }
 
     public static void shutdown() {
@@ -138,8 +170,11 @@ public final class SpeakerAudio {
         if (!available) {
             return;
         }
+        long previous = ALC10.alcGetCurrentContext();
         try {
-            ALC10.alcMakeContextCurrent(0L);
+            if (previous != context) {
+                ALC10.alcMakeContextCurrent(context);
+            }
             if (context != 0L) {
                 ALC10.alcDestroyContext(context);
             }
@@ -147,8 +182,10 @@ public final class SpeakerAudio {
                 ALC10.alcCloseDevice(device);
             }
         } catch (Throwable ignored) {
+        } finally {
+            ALC10.alcMakeContextCurrent(previous == context ? 0L : previous);
+            available = false;
         }
-        available = false;
     }
 
     // ------------------------------------------------------------------ tick
@@ -161,6 +198,15 @@ public final class SpeakerAudio {
             }
             return;
         }
+        long previous = pushContext();
+        try {
+            tickSounds(client);
+        } finally {
+            popContext(previous);
+        }
+    }
+
+    private static void tickSounds(Minecraft client) {
         ClientLevel world = client.level;
         LocalPlayer player = client.player;
         if (world == null || player == null) {
@@ -176,7 +222,9 @@ public final class SpeakerAudio {
         }
 
         // 用 RECORDS 分类：MC 声音设置里有独立的"唱片机"滑块，可以直接控制这类音频 喵
-        float master = client.options.getSoundSourceVolume(SoundSource.RECORDS);
+        // 我们自己的 context 不会自动吃 MC 的主音量，所以这里手动乘上 喵
+        float master = client.options.getSoundSourceVolume(SoundSource.MASTER)
+                * client.options.getSoundSourceVolume(SoundSource.RECORDS);
         Vec3 ear = player.getEyePosition();
 
         // 1) 广播表由服务端推送（信号范围 512 格），这里直接查 喵
@@ -278,9 +326,12 @@ public final class SpeakerAudio {
     private static void updateListener(LocalPlayer player) {
         Vec3 eye = player.getEyePosition();
         Vec3 look = player.getViewVector(1.0F);
+        // 上方向也要跟着头部转动，否则仰头/低头时左右声道会判断错误 喵
+        Vec3 up = player.getUpVector(1.0F);
         AL10.alListener3f(AL10.AL_POSITION, (float) eye.x, (float) eye.y, (float) eye.z);
         AL10.alListenerfv(AL10.AL_ORIENTATION, new float[]{
-                (float) look.x, (float) look.y, (float) look.z, 0.0f, 1.0f, 0.0f});
+                (float) look.x, (float) look.y, (float) look.z,
+                (float) up.x, (float) up.y, (float) up.z});
         AL10.alListenerf(AL10.AL_GAIN, 1.0f);   // 主音量由 source 端的 master 承担，避免重复相乘 喵
     }
 
@@ -394,6 +445,31 @@ public final class SpeakerAudio {
         return dx * dx + dy * dy + dz * dz;
     }
 
+    /**
+     * 把多声道 16-bit PCM 下混成单声道。
+     * OpenAL 对立体声 buffer 不做 3D 空间化，只有单声道 buffer 才会按声源/听者坐标做声像定位 喵
+     */
+    private static ByteBuffer downmixToMono(ByteBuffer source, int channels) {
+        ByteBuffer src = source.duplicate().order(ByteOrder.LITTLE_ENDIAN);
+        int frames = src.remaining() / (2 * channels);
+        ByteBuffer mono = ByteBuffer.allocateDirect(frames * 2).order(ByteOrder.LITTLE_ENDIAN);
+        for (int frame = 0; frame < frames; frame++) {
+            int sum = 0;
+            for (int channel = 0; channel < channels; channel++) {
+                sum += src.getShort();
+            }
+            int sample = sum / channels;
+            if (sample > Short.MAX_VALUE) {
+                sample = Short.MAX_VALUE;
+            } else if (sample < Short.MIN_VALUE) {
+                sample = Short.MIN_VALUE;
+            }
+            mono.putShort((short) sample);
+        }
+        mono.flip();
+        return mono;
+    }
+
     // ------------------------------------------------------------------ 音源 喵
     private static final class Voice {
         private final BlockPos pos;
@@ -411,6 +487,8 @@ public final class SpeakerAudio {
             this.pos = pos;
             this.source = AL10.alGenSources();
             AL10.alSourcef(this.source, AL10.AL_ROLLOFF_FACTOR, 0.0f);
+            // 世界坐标定位（不是相对听者的坐标），这样 OpenAL 才会算声像 喵
+            AL10.alSourcei(this.source, AL10.AL_SOURCE_RELATIVE, AL10.AL_FALSE);
             AL10.alSource3f(this.source, AL10.AL_POSITION,
                     pos.getX() + 0.5f, pos.getY() + 0.5f, pos.getZ() + 0.5f);
             AL10.alSourcef(this.source, AL10.AL_PITCH, 1.0f);
@@ -505,12 +583,16 @@ public final class SpeakerAudio {
                     }
                     return;
                 }
-                int alFormat = format.getChannels() > 1 ? AL10.AL_FORMAT_STEREO16 : AL10.AL_FORMAT_MONO16;
                 int channels = Math.max(1, format.getChannels());
                 int sampleRate = (int) format.getSampleRate();
+                if (channels > 1) {
+                    // OpenAL 不会对立体声 buffer 做 3D 定位；下混成单声道后才能听出方向 喵
+                    pcm = downmixToMono(pcm, channels);
+                    channels = 1;
+                }
                 this.durationSeconds = pcm.remaining() / (2.0 * channels * sampleRate);
                 this.buffer = AL10.alGenBuffers();
-                AL10.alBufferData(this.buffer, alFormat, pcm, sampleRate);
+                AL10.alBufferData(this.buffer, AL10.AL_FORMAT_MONO16, pcm, sampleRate);
                 AL10.alSourcei(this.source, AL10.AL_BUFFER, this.buffer);
                 AL10.alSourcei(this.source, AL10.AL_LOOPING, AL10.AL_FALSE);
                 this.seekToOrigin();
@@ -585,9 +667,14 @@ public final class SpeakerAudio {
         if (voice == null || voice.buffer < 0 || voice.durationSeconds <= 0.0) {
             return null;
         }
-        float offset = AL10.alGetSourcef(voice.source, AL11.AL_SEC_OFFSET);
-        return new float[]{(float) Math.max(0.0, Math.min(voice.durationSeconds, offset)),
-                (float) voice.durationSeconds};
+        long previous = pushContext();
+        try {
+            float offset = AL10.alGetSourcef(voice.source, AL11.AL_SEC_OFFSET);
+            return new float[]{(float) Math.max(0.0, Math.min(voice.durationSeconds, offset)),
+                    (float) voice.durationSeconds};
+        } finally {
+            popContext(previous);
+        }
     }
 
     /** 广播进度（发信器自己不发声，按公共时间轴算）：{已播秒, 总秒}；没在播返回 null 喵 */
