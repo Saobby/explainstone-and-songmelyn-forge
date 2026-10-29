@@ -1,0 +1,45 @@
+# Explainstone and Songmelyn (Forge 1.20.1)
+
+Port of the Fabric 1.21.1 edition of **Explainstone / Songmelyn / Broadcast Transmitter**.
+
+* Stone speakers that play bundled or imported `.ogg` music.
+* Redstone triggering with rising/falling edge detection.
+* Playlist modes (sequence / repeat one / shuffle), channel broadcasting and receive mode.
+* Imported audio is uploaded in chunks and stored inside the world save
+  (`<world>/explainstone/audio/<sha1>.ogg`), then streamed to nearby clients on demand.
+* Client-side OpenAL playback engine, independent of resource packs.
+
+## Build
+
+```bash
+./gradlew build
+```
+
+The mod jar is written to `build/libs/explainstone-<version>.jar`.
+
+## Run
+
+```bash
+./gradlew runClient   # client
+./gradlew runServer   # dedicated server
+```
+
+## Config
+
+Forge config file: `config/explainstone-common.toml`
+
+```toml
+broadcastRequiresOp = false
+```
+
+## Differences from the Fabric edition
+
+* Forge `DeferredRegister` / `SimpleChannel` replace the Fabric API registration and
+  payload APIs.
+* The JSON config was replaced by a Forge common config (`ForgeConfigSpec`).
+* All assets and data pack files were converted to the 1.20.1 layout
+  (`recipes/`, `loot_tables/`, `advancements/`, item field instead of id).
+* Source sets were merged into `src/main/java`; client-only classes are still kept in
+  `com.ginka.explainstone.client` and are never loaded on a dedicated server.
+
+Author: GINKA_3L96WW1. Licensed under MPL-2.0.

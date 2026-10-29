@@ -1,0 +1,23 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "pattern": [
+    " m ",
+    "mnm",
+    "mom"
+  ],
+  "key": {
+    "m": {
+      "item": "minecraft:andesite"
+    },
+    "n": {
+      "item": "minecraft:note_block"
+    },
+    "o": {
+      "item": "minecraft:observer"
+    }
+  },
+  "result": {
+    "count": 1,
+    "item": "explainstone:andesite_speaker_block"
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "pattern": [
+    " m ",
+    "mnm",
+    "mom"
+  ],
+  "key": {
+    "m": {
+      "item": "minecraft:cobblestone"
+    },
+    "n": {
+      "item": "minecraft:note_block"
+    },
+    "o": {
+      "item": "minecraft:observer"
+    }
+  },
+  "result": {
+    "count": 1,
+    "item": "explainstone:cobblestone_speaker_block"
+  }
+}
