@@ -21,6 +21,7 @@ import net.minecraft.world.InteractionHand;
 import net.minecraft.world.InteractionResult;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.item.context.BlockPlaceContext;
+import net.minecraft.world.level.BlockGetter;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.EntityBlock;
@@ -33,6 +34,8 @@ import net.minecraft.world.level.block.state.properties.BlockStateProperties;
 import net.minecraft.world.level.block.state.properties.BooleanProperty;
 import net.minecraft.world.level.block.state.properties.DirectionProperty;
 import net.minecraft.world.phys.BlockHitResult;
+import net.minecraft.world.phys.shapes.CollisionContext;
+import net.minecraft.world.phys.shapes.VoxelShape;
 import org.jetbrains.annotations.Nullable;
 
 public class SpeakerBlock extends Block implements EntityBlock {
@@ -40,6 +43,12 @@ public class SpeakerBlock extends Block implements EntityBlock {
     public static final BooleanProperty PLAYING = BooleanProperty.create("playing");
     /** 网罩朝向（模型正面朝北，放置时朝向玩家） 喵 */
     public static final DirectionProperty FACING = BlockStateProperties.HORIZONTAL_FACING;
+
+    // 模型的实际包围盒：x 0.9~14.4，y 0~16，z 1.5~12.9（正面朝北） 喵
+    private static final VoxelShape SHAPE_NORTH = Block.box(0.9, 0.0, 1.5, 14.4, 16.0, 12.9);
+    private static final VoxelShape SHAPE_EAST = Block.box(3.1, 0.0, 0.9, 14.5, 16.0, 14.4);
+    private static final VoxelShape SHAPE_SOUTH = Block.box(1.6, 0.0, 3.1, 15.1, 16.0, 14.5);
+    private static final VoxelShape SHAPE_WEST = Block.box(1.5, 0.0, 1.6, 12.9, 16.0, 15.1);
 
     public SpeakerBlock(Properties settings) {
         super(settings);
@@ -57,6 +66,21 @@ public class SpeakerBlock extends Block implements EntityBlock {
     public BlockState getStateForPlacement(BlockPlaceContext context) {
         // 网罩面朝玩家 喵
         return this.defaultBlockState().setValue(FACING, context.getHorizontalDirection().getOpposite());
+    }
+
+    private static VoxelShape shapeOf(Direction facing) {
+        return switch (facing) {
+            case SOUTH -> SHAPE_SOUTH;
+            case EAST -> SHAPE_EAST;
+            case WEST -> SHAPE_WEST;
+            default -> SHAPE_NORTH;
+        };
+    }
+
+    /** 选中框/准星命中框只包住模型，而不是整个方块 喵 */
+    @Override
+    public VoxelShape getShape(BlockState state, BlockGetter level, BlockPos pos, CollisionContext context) {
+        return shapeOf(state.getValue(FACING));
     }
 
     @Nullable

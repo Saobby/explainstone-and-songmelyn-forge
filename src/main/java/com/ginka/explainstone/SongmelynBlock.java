@@ -26,12 +26,12 @@ import net.minecraft.world.phys.shapes.VoxelShape;
  * 空出来的部分可以走人。 喵
  */
 public class SongmelynBlock extends SpeakerBlock {
-    // 模型：x 1.6~14.4，y 1.2~15.2，z 11.2~15.9（背面朝 +Z） 喵
+    // 模型：x 1.6~14.4，y 1.2~15.2，z 10.8~15.9（背面朝 +Z） 喵
     // 模型背面在 +Z；blockstate 旋转 y=90 会把 +Z 转到 -X，所以朝东时背面在 x 0~5 喵
-    private static final VoxelShape SHAPE_NORTH = Block.box(1.5, 1.0, 11.0, 14.5, 15.2, 16.0);
-    private static final VoxelShape SHAPE_SOUTH = Block.box(1.5, 1.0, 0.0, 14.5, 15.2, 5.0);
-    private static final VoxelShape SHAPE_EAST = Block.box(0.0, 1.0, 1.5, 5.0, 15.2, 14.5);
-    private static final VoxelShape SHAPE_WEST = Block.box(11.0, 1.0, 1.5, 16.0, 15.2, 14.5);
+    private static final VoxelShape SHAPE_NORTH = Block.box(1.6, 1.2, 10.8, 14.4, 15.2, 15.9);
+    private static final VoxelShape SHAPE_SOUTH = Block.box(1.6, 1.2, 0.1, 14.4, 15.2, 5.2);
+    private static final VoxelShape SHAPE_EAST = Block.box(0.1, 1.2, 1.6, 5.2, 15.2, 14.4);
+    private static final VoxelShape SHAPE_WEST = Block.box(10.8, 1.2, 1.6, 15.9, 15.2, 14.4);
 
     public SongmelynBlock(Properties settings) {
         super(settings);
