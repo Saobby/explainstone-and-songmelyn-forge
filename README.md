@@ -16,6 +16,8 @@ Port of the Fabric 1.21.1 edition of **Explainstone / Songmelyn / Broadcast Tran
   longer restarts the song.
 * One volume slider controls both loudness and audible range:
   `effective range = audibleRangeAtFullVolume × volume / 100`.
+* Directional attenuation: sound is full volume in front of the grille, quieter
+  behind it (configurable via `rearVolumeFactor`).
 
 ## Build
 
@@ -41,6 +43,8 @@ broadcastRequiresOp = false
 # Audible range in blocks at 100% volume. The effective range scales linearly
 # with volume; keep this value identical on client and server.
 audibleRangeAtFullVolume = 40
+# Volume multiplier directly behind a speaker (0.0 = silent, 1.0 = disabled).
+rearVolumeFactor = 0.25
 ```
 
 ## Differences from the Fabric edition

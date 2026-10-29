@@ -33,6 +33,17 @@ public final class ExplainstoneConfig {
                     "Keep this value identical on the client and the server.")
             .defineInRange("audibleRangeAtFullVolume", 40, 8, 256);
 
+    /**
+     * 站在音响正后方时的音量倍率（0.0 = 完全听不到，1.0 = 关闭前后方向衰减）。
+     * 侧面在 1.0 与该值之间线性过渡。只影响客户端播放音量，不影响全服时间轴 喵
+     */
+    public static final ForgeConfigSpec.DoubleValue REAR_VOLUME_FACTOR = BUILDER
+            .comment("Volume multiplier when the listener is directly behind a speaker.",
+                    "0.0 = silent behind, 1.0 = no front/back attenuation.",
+                    "Sides interpolate smoothly between front (1.0) and rear.",
+                    "Client-side only; it does not affect playback synchronization.")
+            .defineInRange("rearVolumeFactor", 0.25, 0.0, 1.0);
+
     public static final ForgeConfigSpec SPEC = BUILDER.build();
 
     private ExplainstoneConfig() {
@@ -46,5 +57,10 @@ public final class ExplainstoneConfig {
     /** 100% 音量时的可闻距离（格） 喵 */
     public static int audibleRangeAtFullVolume() {
         return AUDIBLE_RANGE_AT_FULL_VOLUME.get();
+    }
+
+    /** 正后方音量倍率 喵 */
+    public static double rearVolumeFactor() {
+        return REAR_VOLUME_FACTOR.get();
     }
 }

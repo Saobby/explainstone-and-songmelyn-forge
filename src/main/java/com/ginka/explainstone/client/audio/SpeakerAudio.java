@@ -13,6 +13,7 @@
 package com.ginka.explainstone.client.audio;
 
 import com.ginka.explainstone.BroadcastTransmitterBlock;
+import com.ginka.explainstone.ExplainstoneConfig;
 import com.ginka.explainstone.SpeakerBlock;
 import com.ginka.explainstone.speaker.PlayMode;
 import com.ginka.explainstone.speaker.SpeakerBlockEntity;
@@ -24,6 +25,7 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
 import net.minecraft.core.particles.ParticleTypes;
 import net.minecraft.network.chat.Component;
 import net.minecraft.sounds.SoundSource;
@@ -285,6 +287,7 @@ public final class SpeakerAudio {
             if (!be.isSpeakerEnabled()) {
                 continue;   // 这台讲解石被单独关掉了放音 喵
             }
+            Direction facing = be.getBlockState().getValue(SpeakerBlock.FACING);
             if (be.isReceiveMode()) {
                 BroadcastInfo info = broadcasts.get(be.getChannel());
                 if (info == null || info.tracks().isEmpty()) {
@@ -293,7 +296,7 @@ public final class SpeakerAudio {
                 }
                 active.add(pos);
                 voice(pos).updateTimeline(info.tracks(), info.mode(), info.elapsedTicks(), ear, master,
-                        be.getEffectiveAudibleRange(), be.getVolume(), referenceNanos);
+                        be.getEffectiveAudibleRange(), be.getVolume(), facing, referenceNanos);
                 spawnNotes(world, pos);
             } else if (isPlaying(world, pos)) {
                 SyncSession session = SESSIONS.get(pos);
@@ -303,7 +306,7 @@ public final class SpeakerAudio {
                 }
                 active.add(pos);
                 voice(pos).updateTimeline(session.tracks(), session.mode(), session.elapsedTicks(), ear, master,
-                        be.getEffectiveAudibleRange(), be.getVolume(), referenceNanos);
+                        be.getEffectiveAudibleRange(), be.getVolume(), facing, referenceNanos);
                 spawnNotes(world, pos);
             }
         }
@@ -500,14 +503,6 @@ public final class SpeakerAudio {
         return state.getBlock() instanceof SpeakerBlock && state.getValue(SpeakerBlock.PLAYING);
     }
 
-    /** 方块中心到耳朵的平方距离 喵 */
-    private static double distanceSqToCenter(BlockPos pos, Vec3 vec) {
-        double dx = pos.getX() + 0.5 - vec.x;
-        double dy = pos.getY() + 0.5 - vec.y;
-        double dz = pos.getZ() + 0.5 - vec.z;
-        return dx * dx + dy * dy + dz * dz;
-    }
-
     /**
      * 把多声道 16-bit PCM 下混成单声道。
      * OpenAL 对立体声 buffer 不做 3D 空间化，只有单声道 buffer 才会按声源/听者坐标做声像定位 喵
@@ -679,15 +674,29 @@ public final class SpeakerAudio {
          */
         private void updateTimeline(List<Track> tracks, PlayMode mode, long elapsedTicks, Vec3 ear,
                                     float categoryGain, double audibleRange, int volumePercent,
-                                    long referenceNanos) {
+                                    Direction facing, long referenceNanos) {
             this.volumePercent = Math.max(0, Math.min(100, volumePercent));
-            double distance = Math.sqrt(distanceSqToCenter(this.pos, ear));
+            double dx = ear.x - (this.pos.getX() + 0.5);
+            double dy = ear.y - (this.pos.getY() + 0.5);
+            double dz = ear.z - (this.pos.getZ() + 0.5);
+            double distance = Math.sqrt(dx * dx + dy * dy + dz * dz);
             double range = Math.max(0.0, audibleRange);
             this.rangeHint = (int) Math.ceil(range);
             float distanceGain = (range <= 0.0 || distance >= range)
                     ? 0.0f : (float) (1.0 - distance / range);
             float volumeScale = this.volumePercent / 100.0f;
-            AL10.alSourcef(this.source, AL10.AL_GAIN, Math.max(0.0f, categoryGain * distanceGain * volumeScale));
+
+            // 前后方向衰减：网罩正前方 1.0，正后方取配置值，侧面线性过渡 喵
+            float directionalGain = 1.0f;
+            double horizontal = Math.sqrt(dx * dx + dz * dz);
+            if (facing != null && horizontal > 1.0E-4) {
+                double dot = (dx * facing.getStepX() + dz * facing.getStepZ()) / horizontal;
+                double t = Math.max(0.0, Math.min(1.0, (dot + 1.0) * 0.5));
+                double rear = Math.max(0.0, Math.min(1.0, ExplainstoneConfig.rearVolumeFactor()));
+                directionalGain = (float) (rear + (1.0 - rear) * t);
+            }
+            AL10.alSourcef(this.source, AL10.AL_GAIN, Math.max(0.0f,
+                    categoryGain * distanceGain * volumeScale * directionalGain));
 
             Located located = locate(tracks, mode, elapsedTicks);
             if (located == null) {
