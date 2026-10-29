@@ -46,8 +46,8 @@ import java.util.function.Supplier;
  * 音频库位置：&lt;存档&gt;/explainstone/audio/&lt;sha1&gt;.ogg 喵
  */
 public final class SpeakerNetworking {
-    /** 网络协议版本 喵 */
-    private static final String PROTOCOL_VERSION = "1";
+    /** 网络协议版本（新增 Playback 消息，旧客户端会被安全拒绝） 喵 */
+    private static final String PROTOCOL_VERSION = "2";
     /** 单个文件上限（6 MB），避免误传大文件把存档撑爆 喵 */
     private static final int MAX_FILE_BYTES = 6 * 1024 * 1024;
     /** 单曲时长上限（秒） 喵 */
@@ -90,6 +90,11 @@ public final class SpeakerNetworking {
         CHANNEL.registerMessage(5, SpeakerPayloads.AudioChunk.class,
                 SpeakerPayloads.AudioChunk::encode, SpeakerPayloads.AudioChunk::decode,
                 SpeakerNetworking::handleAudioChunk, Optional.of(NetworkDirection.PLAY_TO_CLIENT));
+
+        // 服务端 → 客户端：讲解石本地播放会话（播放顺序 + 已播放 tick + revision） 喵
+        CHANNEL.registerMessage(6, SpeakerPayloads.Playback.class,
+                SpeakerPayloads.Playback::encode, SpeakerPayloads.Playback::decode,
+                SpeakerNetworking::handlePlayback, Optional.of(NetworkDirection.PLAY_TO_CLIENT));
     }
 
     public static void sendToPlayer(ServerPlayer player, Object message) {
@@ -128,9 +133,17 @@ public final class SpeakerNetworking {
         NetworkEvent.Context context = ctx.get();
         context.enqueueWork(() -> {
             if (context.getSender() != null) {
+                PlaybackRegistry.syncNear(context.getSender());
                 BroadcastRegistry.onJoin(context.getSender());
             }
         });
+        context.setPacketHandled(true);
+    }
+
+    private static void handlePlayback(SpeakerPayloads.Playback payload, Supplier<NetworkEvent.Context> ctx) {
+        NetworkEvent.Context context = ctx.get();
+        context.enqueueWork(() -> DistExecutor.unsafeRunWhenOn(Dist.CLIENT,
+                () -> () -> com.ginka.explainstone.client.ClientNetworkHandler.handlePlayback(payload)));
         context.setPacketHandled(true);
     }
 
@@ -200,9 +213,11 @@ public final class SpeakerNetworking {
             }
         }
 
-        // 发信器的状态变了 → 重新登记并推给 512 格内的玩家 喵
+        // 状态变了 → 重新登记并同步给附近玩家（列表/模式没变时不会重置进度） 喵
         if (level.getBlockState(pos).getBlock() instanceof BroadcastTransmitterBlock) {
             BroadcastRegistry.refresh(level, pos, be);
+        } else if (level.getBlockState(pos).getBlock() instanceof com.ginka.explainstone.SpeakerBlock) {
+            PlaybackRegistry.ensure(level, pos, be);
         }
     }
 

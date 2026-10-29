@@ -10,6 +10,10 @@ Port of the Fabric 1.21.1 edition of **Explainstone / Songmelyn / Broadcast Tran
 * Client-side OpenAL playback engine, independent of resource packs.
 * Directional playback: decoded audio is mono-downmixed and positioned in the world,
   so the stereo image follows where the speaker actually is (turn around and left/right swap).
+* Server-authoritative synchronized playback: the server keeps a fixed playlist order and
+  start tick for every speaker / channel broadcast. Clients compute the current track and
+  offset from that timeline, so all players are in sync and leaving/re-entering range no
+  longer restarts the song.
 
 ## Build
 

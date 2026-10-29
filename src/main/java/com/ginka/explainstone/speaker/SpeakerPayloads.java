@@ -98,18 +98,41 @@ public final class SpeakerPayloads {
     }
 
     /** 服务端 → 客户端：某频道开始/停止广播（信号范围 512 格） 喵 */
-    public record Broadcast(int channel, int mode, int index, boolean active, String tracks) {
+    public record Broadcast(int channel, int mode, boolean active, String tracks,
+                            long elapsedTicks, long revision) {
         public void encode(FriendlyByteBuf buf) {
             buf.writeVarInt(this.channel);
             buf.writeVarInt(this.mode);
-            buf.writeVarInt(this.index);
             buf.writeBoolean(this.active);
             buf.writeUtf(this.tracks);
+            buf.writeLong(this.elapsedTicks);
+            buf.writeLong(this.revision);
         }
 
         public static Broadcast decode(FriendlyByteBuf buf) {
-            return new Broadcast(buf.readVarInt(), buf.readVarInt(), buf.readVarInt(),
-                    buf.readBoolean(), buf.readUtf());
+            return new Broadcast(buf.readVarInt(), buf.readVarInt(), buf.readBoolean(),
+                    buf.readUtf(), buf.readLong(), buf.readLong());
+        }
+    }
+
+    /**
+     * 服务端 → 客户端：某个讲解石方块的本地播放会话。
+     * elapsedTicks 是发包时已经播放的游戏 tick 数，客户端再加本地经过的 tick 即可对齐 喵
+     */
+    public record Playback(BlockPos pos, int mode, boolean active, String tracks,
+                           long elapsedTicks, long revision) {
+        public void encode(FriendlyByteBuf buf) {
+            buf.writeBlockPos(this.pos);
+            buf.writeVarInt(this.mode);
+            buf.writeBoolean(this.active);
+            buf.writeUtf(this.tracks);
+            buf.writeLong(this.elapsedTicks);
+            buf.writeLong(this.revision);
+        }
+
+        public static Playback decode(FriendlyByteBuf buf) {
+            return new Playback(buf.readBlockPos(), buf.readVarInt(), buf.readBoolean(),
+                    buf.readUtf(), buf.readLong(), buf.readLong());
         }
     }
 

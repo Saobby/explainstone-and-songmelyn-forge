@@ -28,4 +28,8 @@ public final class ClientNetworkHandler {
     public static void handleAudioChunk(SpeakerPayloads.AudioChunk payload) {
         SpeakerAudioCache.onChunk(payload);
     }
+
+    public static void handlePlayback(SpeakerPayloads.Playback payload) {
+        SpeakerAudio.onPlayback(payload);
+    }
 }

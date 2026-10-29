@@ -12,9 +12,11 @@
  */
 package com.ginka.explainstone;
 
+import com.ginka.explainstone.speaker.PlaybackRegistry;
 import com.ginka.explainstone.speaker.SpeakerBlockEntity;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
+import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.InteractionResult;
 import net.minecraft.world.entity.player.Player;
@@ -23,6 +25,8 @@ import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.EntityBlock;
 import net.minecraft.world.level.block.entity.BlockEntity;
+import net.minecraft.world.level.block.entity.BlockEntityTicker;
+import net.minecraft.world.level.block.entity.BlockEntityType;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.StateDefinition;
 import net.minecraft.world.level.block.state.properties.BlockStateProperties;
@@ -61,6 +65,20 @@ public class SpeakerBlock extends Block implements EntityBlock {
         return new SpeakerBlockEntity(pos, state);
     }
 
+    /** 服务端用 ticker 维护播放会话：缺了就补、列表变了就重开、每 5 秒重推一次 喵 */
+    @Nullable
+    @Override
+    public <T extends BlockEntity> BlockEntityTicker<T> getTicker(Level level, BlockState state, BlockEntityType<T> type) {
+        if (level.isClientSide) {
+            return null;
+        }
+        return (lvl, pos, st, be) -> {
+            if (lvl instanceof ServerLevel serverLevel && be instanceof SpeakerBlockEntity speaker) {
+                PlaybackRegistry.tick(serverLevel, pos, st, speaker);
+            }
+        };
+    }
+
     @Override
     public InteractionResult use(BlockState state, Level level, BlockPos pos, Player player, InteractionHand hand,
                                  BlockHitResult hit) {
@@ -85,9 +103,24 @@ public class SpeakerBlock extends Block implements EntityBlock {
             be.setLastPowered(powered);
             if (edge && be.isRespectRedstone() && state.getValue(PLAYING) != powered) {
                 level.setBlock(pos, state.setValue(PLAYING, powered), Block.UPDATE_ALL);
+                if (level instanceof ServerLevel serverLevel) {
+                    if (powered) {
+                        PlaybackRegistry.ensure(serverLevel, pos, be);
+                    } else {
+                        PlaybackRegistry.stop(serverLevel, pos);
+                    }
+                }
             }
         }
         super.neighborChanged(state, level, pos, sourceBlock, sourcePos, notify);
+    }
+
+    @Override
+    public void onRemove(BlockState state, Level level, BlockPos pos, BlockState newState, boolean moved) {
+        if (!level.isClientSide && !state.is(newState.getBlock()) && level instanceof ServerLevel serverLevel) {
+            PlaybackRegistry.stop(serverLevel, pos);
+        }
+        super.onRemove(state, level, pos, newState, moved);
     }
 
     @Override

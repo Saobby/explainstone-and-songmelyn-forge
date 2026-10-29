@@ -13,6 +13,7 @@
 package com.ginka.explainstone;
 
 import com.ginka.explainstone.speaker.BroadcastRegistry;
+import com.ginka.explainstone.speaker.PlaybackRegistry;
 import com.ginka.explainstone.speaker.SpeakerNetworking;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerPlayer;
@@ -21,6 +22,7 @@ import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.common.MinecraftForge;
 import net.minecraftforge.event.BuildCreativeModeTabContentsEvent;
 import net.minecraftforge.event.entity.player.PlayerEvent;
+import net.minecraftforge.event.server.ServerStoppedEvent;
 import net.minecraftforge.eventbus.api.IEventBus;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraftforge.fml.DistExecutor;
@@ -73,8 +75,16 @@ public class Explainstone {
 	}
 
 	@SubscribeEvent
+	public void onServerStopped(ServerStoppedEvent event) {
+		PlaybackRegistry.clear();
+		BroadcastRegistry.clear();
+	}
+
+	@SubscribeEvent
 	public void onPlayerJoin(PlayerEvent.PlayerLoggedInEvent event) {
 		if (event.getEntity() instanceof ServerPlayer player) {
+			// 补发附近正在播放的讲解石会话 + 频道广播 喵
+			PlaybackRegistry.syncNear(player);
 			BroadcastRegistry.onJoin(player);
 		}
 	}
