@@ -23,6 +23,16 @@ public final class ExplainstoneConfig {
             .comment("Whether only operators (permission level 2) may start a broadcast.")
             .define("broadcastRequiresOp", false);
 
+    /**
+     * 100% 音量时的可闻距离（格）。
+     * 实际距离 = 该值 × 音量百分比；例如音量 50% 时范围减半 喵
+     */
+    public static final ForgeConfigSpec.IntValue AUDIBLE_RANGE_AT_FULL_VOLUME = BUILDER
+            .comment("Audible range in blocks at 100% volume.",
+                    "The effective range scales linearly with volume (50% volume = half the range).",
+                    "Keep this value identical on the client and the server.")
+            .defineInRange("audibleRangeAtFullVolume", 40, 8, 256);
+
     public static final ForgeConfigSpec SPEC = BUILDER.build();
 
     private ExplainstoneConfig() {
@@ -31,5 +41,10 @@ public final class ExplainstoneConfig {
     /** 广播是否只允许 OP（默认 false，谁都能广播） 喵 */
     public static boolean broadcastRequiresOp() {
         return BROADCAST_REQUIRES_OP.get();
+    }
+
+    /** 100% 音量时的可闻距离（格） 喵 */
+    public static int audibleRangeAtFullVolume() {
+        return AUDIBLE_RANGE_AT_FULL_VOLUME.get();
     }
 }

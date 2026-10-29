@@ -88,7 +88,6 @@ public class SpeakerScreen extends Screen {
     private long pendingVolumeAt;
 
     private int pendingRangeValue = -1;
-    private boolean pendingRangeTransmit;
     private long pendingRangeAt;
 
     public SpeakerScreen(BlockPos pos) {
@@ -260,26 +259,22 @@ public class SpeakerScreen extends Screen {
             send(SpeakerPayloads.ACTION_SET_CHANNEL, DEFAULT_CHANNEL);
         }).bounds(this.left + 162, this.channelY - 1, 56, BTN_H).build());
 
-        // 距离滑块 喵
+        // 滑块：发信器保留信号范围；音响只用音量（音量同时决定可闻范围） 喵
         if (this.isTransmitter()) {
             int value = be == null ? 512 : be.getTransmitRange();
             this.rangeSlider = this.addRenderableWidget(new IntSlider(this.left, this.sliderY, this.panelW, BTN_H,
-                    Component.translatable("screen.explainstone.slider.range").getString(), 32, 512, value, v -> this.queueRange(v, true)));
+                    Component.translatable("screen.explainstone.slider.range").getString(), 32, 512, value, this::queueRange));
         } else {
-            int distance = be == null ? 40 : be.getAudibleRange();
             int volume = be == null ? 100 : be.getVolume();
-            this.rangeSlider = this.addRenderableWidget(new IntSlider(this.left, this.sliderY, half, BTN_H,
-                    Component.translatable("screen.explainstone.slider.distance").getString(), 8, 48, distance, v -> this.queueRange(v, false)));
-            this.volumeSlider = this.addRenderableWidget(new IntSlider(this.left + half + 4, this.sliderY, half, BTN_H,
-                    Component.translatable("screen.explainstone.slider.volume").getString(), 0, 100, volume, v -> this.queueVolume(v)));
+            this.volumeSlider = this.addRenderableWidget(new IntSlider(this.left, this.sliderY, this.panelW, BTN_H,
+                    Component.translatable("screen.explainstone.slider.volume").getString(), 0, 100, volume, this::queueVolume));
         }
 
         this.refreshLabels();
     }
 
-    private void queueRange(int value, boolean transmit) {
+    private void queueRange(int value) {
         this.pendingRangeValue = value;
-        this.pendingRangeTransmit = transmit;
         this.pendingRangeAt = System.currentTimeMillis() + 150;
     }
 
@@ -300,8 +295,7 @@ public class SpeakerScreen extends Screen {
         if (this.pendingRangeValue < 0 || System.currentTimeMillis() < this.pendingRangeAt) {
             return;
         }
-        send(this.pendingRangeTransmit ? SpeakerPayloads.ACTION_SET_TRANSMIT_RANGE
-                : SpeakerPayloads.ACTION_SET_AUDIBLE_RANGE, this.pendingRangeValue);
+        send(SpeakerPayloads.ACTION_SET_TRANSMIT_RANGE, this.pendingRangeValue);
         this.pendingRangeValue = -1;
     }
 
@@ -426,8 +420,7 @@ public class SpeakerScreen extends Screen {
             }
         }
         if (this.rangeSlider != null && this.pendingRangeValue < 0) {
-            int actual = transmitter ? (be == null ? 512 : be.getTransmitRange())
-                    : (be == null ? 40 : be.getAudibleRange());
+            int actual = be == null ? 512 : be.getTransmitRange();
             if (this.rangeSlider.getIntValue() != actual) {
                 this.rangeSlider.setIntValue(actual);
             }

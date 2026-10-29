@@ -44,7 +44,6 @@
   "screen.explainstone.list.empty": "播放列表为空",
   "screen.explainstone.list.downloading": "  (下载中…)",
   "screen.explainstone.list.hint": "点击选择曲目 · 滚轮翻页 · 共 %s 首",
-  "screen.explainstone.slider.distance": "距离",
   "screen.explainstone.slider.volume": "音量",
   "screen.explainstone.slider.range": "传播距离",
   "message.explainstone.prefix": "[%s] %s",

@@ -35,9 +35,7 @@ public final class SpeakerPayloads {
     public static final int ACTION_TOGGLE_ENABLED = 10;
     /** 设置发信器传播距离（value = 32..512） 喵 */
     public static final int ACTION_SET_TRANSMIT_RANGE = 11;
-    /** 设置讲解石播放距离（value = 8..512） 喵 */
-    public static final int ACTION_SET_AUDIBLE_RANGE = 12;
-    /** 设置本机音量（value = 0..100） 喵 */
+    /** 设置本机音量（value = 0..100，同时决定可闻范围） 喵 */
     public static final int ACTION_SET_VOLUME = 13;
 
     /** 单次传输的分块大小（远小于包上限） 喵 */

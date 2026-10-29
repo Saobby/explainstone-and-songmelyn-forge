@@ -44,7 +44,6 @@
   "screen.explainstone.list.empty": "Playlist is empty",
   "screen.explainstone.list.downloading": "  (downloading…)",
   "screen.explainstone.list.hint": "Click a track · scroll to page · %s tracks",
-  "screen.explainstone.slider.distance": "Range",
   "screen.explainstone.slider.volume": "Volume",
   "screen.explainstone.slider.range": "Signal",
   "message.explainstone.prefix": "[%s] %s",

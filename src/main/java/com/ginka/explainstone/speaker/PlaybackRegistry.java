@@ -131,7 +131,7 @@ public final class PlaybackRegistry {
                 continue;
             }
             if (level.getBlockEntity(pos) instanceof SpeakerBlockEntity be) {
-                session.range = Math.max(64, be.getAudibleRange() + 16);
+                session.range = Math.max(64, (int) Math.ceil(be.getEffectiveAudibleRange()) + 16);
             }
             if (player.blockPosition().distSqr(pos) <= (double) session.range * session.range) {
                 send(player, pos, session, level);
@@ -157,7 +157,7 @@ public final class PlaybackRegistry {
         Session existing = map.get(pos);
         if (existing != null && existing.matches(tracks, mode, selected)) {
             // 只是音量/距离变了：保留原进度 喵
-            existing.range = Math.max(64, be.getAudibleRange() + 16);
+            existing.range = Math.max(64, (int) Math.ceil(be.getEffectiveAudibleRange()) + 16);
             return;
         }
 
@@ -167,7 +167,7 @@ public final class PlaybackRegistry {
             return;
         }
         Session session = new Session(tracks, selected, mode, order, level.getGameTime(), ++REVISION);
-        session.range = Math.max(64, be.getAudibleRange() + 16);
+        session.range = Math.max(64, (int) Math.ceil(be.getEffectiveAudibleRange()) + 16);
         map.put(pos.immutable(), session);
         LOGGER.info("playback session start pos={} mode={} order={} rev={}",
                 pos.toShortString(), mode, order.size(), session.revision);

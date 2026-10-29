@@ -199,7 +199,6 @@ public final class SpeakerNetworking {
             case SpeakerPayloads.ACTION_SET_TIMER -> be.setTimerSeconds(payload.value());
             case SpeakerPayloads.ACTION_TOGGLE_ENABLED -> be.setSpeakerEnabled(!be.isSpeakerEnabled());
             case SpeakerPayloads.ACTION_SET_TRANSMIT_RANGE -> be.setTransmitRange(payload.value());
-            case SpeakerPayloads.ACTION_SET_AUDIBLE_RANGE -> be.setAudibleRange(payload.value());
             case SpeakerPayloads.ACTION_SET_VOLUME -> be.setVolume(payload.value());
             case SpeakerPayloads.ACTION_PLAY_INDEX -> {
                 be.setSelected(payload.value());

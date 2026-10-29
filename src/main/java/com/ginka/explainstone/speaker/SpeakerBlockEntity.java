@@ -12,6 +12,7 @@
  */
 package com.ginka.explainstone.speaker;
 
+import com.ginka.explainstone.ExplainstoneConfig;
 import com.ginka.explainstone.ModBlocks;
 import net.minecraft.core.BlockPos;
 import net.minecraft.nbt.CompoundTag;
@@ -47,8 +48,6 @@ public class SpeakerBlockEntity extends BlockEntity {
     private int transmitRange = 512;
     /** 本机音量百分比 0-100 喵 */
     private int volume = 100;
-    /** 讲解石播放音频的可闻距离（格），8-48 喵 */
-    private int audibleRange = 40;
     /** 定时播放秒数（0 = 不定时），只对发信器有效 喵 */
     private int timerSeconds;
     /** 定时倒计时（tick），运行时用 喵 */
@@ -168,13 +167,9 @@ public class SpeakerBlockEntity extends BlockEntity {
         this.sync();
     }
 
-    public int getAudibleRange() {
-        return this.audibleRange;
-    }
-
-    public void setAudibleRange(int range) {
-        this.audibleRange = Math.max(8, Math.min(48, range));
-        this.sync();
+    /** 实际可闻距离 = 配置的满音量范围 × 当前音量 喵 */
+    public double getEffectiveAudibleRange() {
+        return ExplainstoneConfig.audibleRangeAtFullVolume() * (this.volume / 100.0);
     }
 
     public int getTimerSeconds() {
@@ -249,7 +244,6 @@ public class SpeakerBlockEntity extends BlockEntity {
         nbt.putInt("timerSeconds", this.timerSeconds);
         nbt.putBoolean("speakerEnabled", this.speakerEnabled);
         nbt.putInt("transmitRange", this.transmitRange);
-        nbt.putInt("audibleRange", this.audibleRange);
         nbt.putInt("volume", this.volume);
     }
 
@@ -292,9 +286,6 @@ public class SpeakerBlockEntity extends BlockEntity {
         }
         if (nbt.contains("volume")) {
             this.volume = Math.max(0, Math.min(100, nbt.getInt("volume")));
-        }
-        if (nbt.contains("audibleRange")) {
-            this.audibleRange = Math.max(8, Math.min(48, nbt.getInt("audibleRange")));
         }
     }
 

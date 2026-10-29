@@ -14,6 +14,8 @@ Port of the Fabric 1.21.1 edition of **Explainstone / Songmelyn / Broadcast Tran
   start tick for every speaker / channel broadcast. Clients compute the current track and
   offset from that timeline, so all players are in sync and leaving/re-entering range no
   longer restarts the song.
+* One volume slider controls both loudness and audible range:
+  `effective range = audibleRangeAtFullVolume × volume / 100`.
 
 ## Build
 
@@ -36,6 +38,9 @@ Forge config file: `config/explainstone-common.toml`
 
 ```toml
 broadcastRequiresOp = false
+# Audible range in blocks at 100% volume. The effective range scales linearly
+# with volume; keep this value identical on client and server.
+audibleRangeAtFullVolume = 40
 ```
 
 ## Differences from the Fabric edition

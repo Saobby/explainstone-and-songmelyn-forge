@@ -281,7 +281,7 @@ public final class SpeakerAudio {
                 }
                 active.add(pos);
                 voice(pos).updateTimeline(info.tracks(), info.mode(), info.elapsedTicks(), ear, master,
-                        be.getAudibleRange(), be.getVolume(), referenceNanos);
+                        be.getEffectiveAudibleRange(), be.getVolume(), referenceNanos);
                 spawnNotes(world, pos);
             } else if (isPlaying(world, pos)) {
                 SyncSession session = SESSIONS.get(pos);
@@ -291,7 +291,7 @@ public final class SpeakerAudio {
                 }
                 active.add(pos);
                 voice(pos).updateTimeline(session.tracks(), session.mode(), session.elapsedTicks(), ear, master,
-                        be.getAudibleRange(), be.getVolume(), referenceNanos);
+                        be.getEffectiveAudibleRange(), be.getVolume(), referenceNanos);
                 spawnNotes(world, pos);
             }
         }
@@ -446,8 +446,8 @@ public final class SpeakerAudio {
                             if (!receive && !state.getValue(SpeakerBlock.PLAYING)) {
                                 continue;
                             }
-                            double range = Math.max(8, Math.min(48, be.getAudibleRange()));
-                            if (pos.distSqr(center) <= range * range) {
+                            double range = be.getEffectiveAudibleRange();
+                            if (range > 0.0 && pos.distSqr(center) <= range * range) {
                                 outSpeakers.add(pos);
                             }
                         }
@@ -640,13 +640,14 @@ public final class SpeakerAudio {
          * 同一首歌已经在放就只做小幅度纠偏，不打断声音 喵
          */
         private void updateTimeline(List<Track> tracks, PlayMode mode, long elapsedTicks, Vec3 ear,
-                                    float categoryGain, int audibleRange, int volumePercent,
+                                    float categoryGain, double audibleRange, int volumePercent,
                                     long referenceNanos) {
             this.volumePercent = Math.max(0, Math.min(100, volumePercent));
             double distance = Math.sqrt(distanceSqToCenter(this.pos, ear));
-            float range = Math.max(8, Math.min(48, audibleRange));
-            this.rangeHint = (int) range;
-            float distanceGain = distance >= range ? 0.0f : (float) (1.0 - distance / range);
+            double range = Math.max(0.0, audibleRange);
+            this.rangeHint = (int) Math.ceil(range);
+            float distanceGain = (range <= 0.0 || distance >= range)
+                    ? 0.0f : (float) (1.0 - distance / range);
             float volumeScale = this.volumePercent / 100.0f;
             AL10.alSourcef(this.source, AL10.AL_GAIN, Math.max(0.0f, categoryGain * distanceGain * volumeScale));
 
