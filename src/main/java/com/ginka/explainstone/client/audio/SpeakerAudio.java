@@ -104,6 +104,8 @@ public final class SpeakerAudio {
     private static boolean wasNeedingSync;
     /** 当前客户端世界；换维度时清掉旧会话 喵 */
     private static ClientLevel lastWorld;
+    /** 单机 Esc 暂停时我们自己的音源也要暂停 喵 */
+    private static boolean audioPaused;
 
     private static long device;
     private static long context;
@@ -182,6 +184,7 @@ public final class SpeakerAudio {
             REQUESTED.clear();
             lastWorld = null;
             wasNeedingSync = false;
+            audioPaused = false;
         } finally {
             popContext(previous);
         }
@@ -240,6 +243,15 @@ public final class SpeakerAudio {
             lastWorld = world;
             SESSIONS.clear();
             BROADCASTS.clear();
+        }
+        // 单机暂停：客户端 tick 仍在跑，但集成服务端已停；必须一起暂停音源并冻结时钟，
+        // 否则每 2 秒的 Resync 会把时间轴拉回暂停点，听起来像片段反复 喵
+        if (client.isPaused()) {
+            pauseVoices();
+            return;
+        }
+        if (audioPaused) {
+            resumeVoices();
         }
         updateListener(player);
         clock++;
@@ -354,6 +366,31 @@ public final class SpeakerAudio {
         AL10.alListenerf(AL10.AL_GAIN, 1.0f);   // 主音量由 source 端的 master 承担，避免重复相乘 喵
     }
 
+    /** 单机暂停：把所有正在播放的音源暂停（位置会保留） 喵 */
+    private static void pauseVoices() {
+        if (audioPaused) {
+            return;
+        }
+        audioPaused = true;
+        for (Voice voice : VOICES.values()) {
+            if (voice.source >= 0
+                    && AL10.alGetSourcei(voice.source, AL10.AL_SOURCE_STATE) == AL10.AL_PLAYING) {
+                AL10.alSourcePause(voice.source);
+            }
+        }
+    }
+
+    /** 恢复暂停的音源（只恢复确实处于 paused 状态的） 喵 */
+    private static void resumeVoices() {
+        audioPaused = false;
+        for (Voice voice : VOICES.values()) {
+            if (voice.source >= 0
+                    && AL10.alGetSourcei(voice.source, AL10.AL_SOURCE_STATE) == AL10.AL_PAUSED) {
+                AL10.alSourcePlay(voice.source);
+            }
+        }
+    }
+
     private static void clear() {
         if (!available) {
             return;
@@ -369,6 +406,7 @@ public final class SpeakerAudio {
         BROADCASTS.clear();
         lastWorld = null;
         wasNeedingSync = false;
+        audioPaused = false;
     }
 
     // ------------------------------------------------------------------ 扫描 喵

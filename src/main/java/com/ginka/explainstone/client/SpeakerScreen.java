@@ -86,9 +86,14 @@ public class SpeakerScreen extends Screen {
     private IntSlider volumeSlider;
     private int pendingVolumeValue = -1;
     private long pendingVolumeAt;
+    /** 已经发出、等待服务端确认的音量；确认前不要把滑块拉回旧值（会闪烁） 喵 */
+    private int awaitingVolumeValue = -1;
+    private long awaitingVolumeUntil;
 
     private int pendingRangeValue = -1;
     private long pendingRangeAt;
+    private int awaitingRangeValue = -1;
+    private long awaitingRangeUntil;
 
     public SpeakerScreen(BlockPos pos) {
         super(Component.translatable("screen.explainstone.title.speaker"));
@@ -287,16 +292,22 @@ public class SpeakerScreen extends Screen {
         if (this.pendingVolumeValue < 0 || System.currentTimeMillis() < this.pendingVolumeAt) {
             return;
         }
-        send(SpeakerPayloads.ACTION_SET_VOLUME, this.pendingVolumeValue);
+        int value = this.pendingVolumeValue;
         this.pendingVolumeValue = -1;
+        this.awaitingVolumeValue = value;
+        this.awaitingVolumeUntil = System.currentTimeMillis() + 1500L;
+        send(SpeakerPayloads.ACTION_SET_VOLUME, value);
     }
 
     private void flushPendingRange() {
         if (this.pendingRangeValue < 0 || System.currentTimeMillis() < this.pendingRangeAt) {
             return;
         }
-        send(SpeakerPayloads.ACTION_SET_TRANSMIT_RANGE, this.pendingRangeValue);
+        int value = this.pendingRangeValue;
         this.pendingRangeValue = -1;
+        this.awaitingRangeValue = value;
+        this.awaitingRangeUntil = System.currentTimeMillis() + 1500L;
+        send(SpeakerPayloads.ACTION_SET_TRANSMIT_RANGE, value);
     }
 
     /** 强制保留 "350." 前缀，后面最多 3 位数字 喵 */
@@ -413,16 +424,27 @@ public class SpeakerScreen extends Screen {
         }
         this.flushPendingRange();
         this.flushPendingVolume();
-        if (this.volumeSlider != null && this.pendingVolumeValue < 0) {
-            int actual = be == null ? 100 : be.getVolume();
-            if (this.volumeSlider.getIntValue() != actual) {
-                this.volumeSlider.setIntValue(actual);
-            }
+
+        long now = System.currentTimeMillis();
+        int actualVolume = be == null ? 100 : be.getVolume();
+        if (this.awaitingVolumeValue >= 0
+                && (actualVolume == this.awaitingVolumeValue || now > this.awaitingVolumeUntil)) {
+            this.awaitingVolumeValue = -1;
         }
-        if (this.rangeSlider != null && this.pendingRangeValue < 0) {
-            int actual = be == null ? 512 : be.getTransmitRange();
-            if (this.rangeSlider.getIntValue() != actual) {
-                this.rangeSlider.setIntValue(actual);
+        if (this.volumeSlider != null && this.pendingVolumeValue < 0 && this.awaitingVolumeValue < 0
+                && this.volumeSlider.getIntValue() != actualVolume) {
+            this.volumeSlider.setIntValue(actualVolume);
+        }
+
+        if (this.rangeSlider != null) {
+            int actualRange = be == null ? 512 : be.getTransmitRange();
+            if (this.awaitingRangeValue >= 0
+                    && (actualRange == this.awaitingRangeValue || now > this.awaitingRangeUntil)) {
+                this.awaitingRangeValue = -1;
+            }
+            if (this.pendingRangeValue < 0 && this.awaitingRangeValue < 0
+                    && this.rangeSlider.getIntValue() != actualRange) {
+                this.rangeSlider.setIntValue(actualRange);
             }
         }
     }
