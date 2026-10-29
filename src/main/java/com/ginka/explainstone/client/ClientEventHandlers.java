@@ -37,6 +37,7 @@ public final class ClientEventHandlers {
     /** 退出世界时停掉所有音源，避免残留声音 喵 */
     @SubscribeEvent
     public static void onLoggingOut(ClientPlayerNetworkEvent.LoggingOut event) {
-        SpeakerAudio.reset();
+        // OpenAL / 音源表都在客户端主线程上操作，这里统一切回主线程 喵
+        Minecraft.getInstance().execute(SpeakerAudio::reset);
     }
 }

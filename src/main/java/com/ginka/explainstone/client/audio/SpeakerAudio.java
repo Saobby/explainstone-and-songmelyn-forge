@@ -45,6 +45,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -173,6 +174,7 @@ public final class SpeakerAudio {
                 voice.dispose();
             }
             VOICES.clear();
+            clearBufferCache();
             speakers = List.of();
             transmitters = List.of();
             SESSIONS.clear();
@@ -241,6 +243,8 @@ public final class SpeakerAudio {
         }
         updateListener(player);
         clock++;
+        // 本 tick 所有音响共用一个参考时刻：解码耗时会计入偏移补偿，避免起播错开 喵
+        long referenceNanos = System.nanoTime();
 
         // 扫描间隔随半径自适应：范围越大扫得越稀，避免大范围时卡顿 喵
         if (tickCounter++ % scanInterval() == 0) {
@@ -277,7 +281,7 @@ public final class SpeakerAudio {
                 }
                 active.add(pos);
                 voice(pos).updateTimeline(info.tracks(), info.mode(), info.elapsedTicks(), ear, master,
-                        be.getAudibleRange(), be.getVolume());
+                        be.getAudibleRange(), be.getVolume(), referenceNanos);
                 spawnNotes(world, pos);
             } else if (isPlaying(world, pos)) {
                 SyncSession session = SESSIONS.get(pos);
@@ -287,7 +291,7 @@ public final class SpeakerAudio {
                 }
                 active.add(pos);
                 voice(pos).updateTimeline(session.tracks(), session.mode(), session.elapsedTicks(), ear, master,
-                        be.getAudibleRange(), be.getVolume());
+                        be.getAudibleRange(), be.getVolume(), referenceNanos);
                 spawnNotes(world, pos);
             }
         }
@@ -358,6 +362,7 @@ public final class SpeakerAudio {
             voice.dispose();
         }
         VOICES.clear();
+        clearBufferCache();
         speakers = List.of();
         transmitters = List.of();
         SESSIONS.clear();
@@ -490,6 +495,124 @@ public final class SpeakerAudio {
         return mono;
     }
 
+    // ------------------------------------------------------------ 共享解码 buffer 喵
+    /**
+     * 同一首曲子只解码一次，多个音响共用同一个 OpenAL buffer。
+     * 这既省内存，也避免 4 个音响各自解码导致起播时间错开（回声） 喵
+     */
+    private static final int MAX_CACHED_BUFFERS = 3;
+    private static final Map<String, SharedBuffer> BUFFER_CACHE = new LinkedHashMap<>(8, 0.75f, true);
+
+    private static final class SharedBuffer {
+        final int buffer;
+        final double durationSeconds;
+        int users;
+
+        private SharedBuffer(int buffer, double durationSeconds) {
+            this.buffer = buffer;
+            this.durationSeconds = durationSeconds;
+        }
+    }
+
+    private static SharedBuffer acquireBuffer(Track track) {
+        SharedBuffer cached = BUFFER_CACHE.get(track.id());
+        if (cached != null) {
+            cached.users++;
+            return cached;
+        }
+        // 没有缓存 → 解码一次并建成共享 buffer 喵
+        InputStream stream = AudioSources.open(track);
+        if (stream == null) {
+            return null;
+        }
+        try (OggAudioStream ogg = new OggAudioStream(stream)) {
+            javax.sound.sampled.AudioFormat format = ogg.getFormat();
+            ByteBuffer pcm = ogg.readAll();
+            if (pcm == null || !pcm.hasRemaining()) {
+                return null;
+            }
+            if (!pcm.isDirect()) {
+                ByteBuffer direct = ByteBuffer.allocateDirect(pcm.remaining());
+                direct.put(pcm.duplicate());
+                direct.flip();
+                pcm = direct;
+            }
+            int channels = Math.max(1, format.getChannels());
+            int sampleRate = (int) format.getSampleRate();
+            if (channels > 1) {
+                // OpenAL 不会对立体声 buffer 做 3D 定位；下混成单声道后才能听出方向 喵
+                pcm = downmixToMono(pcm, channels);
+                channels = 1;
+            }
+            if (pcm.remaining() > MAX_PCM_BYTES) {
+                LOGGER.warn("音频解码后过大({} MB)，跳过播放: {}",
+                        pcm.remaining() / (1024 * 1024), track.id());
+                if (!warnedTooBig) {
+                    warnedTooBig = true;
+                    Minecraft client = Minecraft.getInstance();
+                    if (client.player != null) {
+                        client.player.displayClientMessage(
+                                Component.translatable("message.explainstone.audio.too_big"), false);
+                    }
+                }
+                return null;
+            }
+            double duration = pcm.remaining() / (2.0 * channels * sampleRate);
+            int buffer = AL10.alGenBuffers();
+            if (buffer == 0) {
+                LOGGER.warn("alGenBuffers 失败: {}", track.id());
+                return null;
+            }
+            AL10.alBufferData(buffer, AL10.AL_FORMAT_MONO16, pcm, sampleRate);
+            int error = AL10.alGetError();
+            if (error != AL10.AL_NO_ERROR) {
+                LOGGER.warn("上传音频 buffer 失败(0x{}): {}", Integer.toHexString(error), track.id());
+                AL10.alDeleteBuffers(buffer);
+                return null;
+            }
+            SharedBuffer shared = new SharedBuffer(buffer, duration);
+            shared.users = 1;
+            BUFFER_CACHE.put(track.id(), shared);
+            trimBufferCache();
+            return shared;
+        } catch (Exception e) {
+            LOGGER.warn("解码音频失败 {}: {}", track.id(), e.toString());
+            return null;
+        }
+    }
+
+    private static void releaseBuffer(SharedBuffer shared) {
+        if (shared == null) {
+            return;
+        }
+        if (shared.users > 0) {
+            shared.users--;
+        }
+        trimBufferCache();
+    }
+
+    /** 缓存超过上限时删掉最久未用且没有音响在用的 buffer 喵 */
+    private static void trimBufferCache() {
+        if (BUFFER_CACHE.size() <= MAX_CACHED_BUFFERS) {
+            return;
+        }
+        Iterator<Map.Entry<String, SharedBuffer>> it = BUFFER_CACHE.entrySet().iterator();
+        while (BUFFER_CACHE.size() > MAX_CACHED_BUFFERS && it.hasNext()) {
+            SharedBuffer shared = it.next().getValue();
+            if (shared.users <= 0) {
+                AL10.alDeleteBuffers(shared.buffer);
+                it.remove();
+            }
+        }
+    }
+
+    private static void clearBufferCache() {
+        for (SharedBuffer shared : BUFFER_CACHE.values()) {
+            AL10.alDeleteBuffers(shared.buffer);
+        }
+        BUFFER_CACHE.clear();
+    }
+
     // ------------------------------------------------------------------ 音源 喵
     private static final class Voice {
         private final BlockPos pos;
@@ -498,7 +621,8 @@ public final class SpeakerAudio {
         private int volumePercent = 100;
         private double durationSeconds;
         private int source;
-        private int buffer = -1;
+        /** 共享的 OpenAL buffer（多个音响可以指向同一个） 喵 */
+        private SharedBuffer shared;
 
         private Voice(BlockPos pos) {
             this.pos = pos;
@@ -516,7 +640,8 @@ public final class SpeakerAudio {
          * 同一首歌已经在放就只做小幅度纠偏，不打断声音 喵
          */
         private void updateTimeline(List<Track> tracks, PlayMode mode, long elapsedTicks, Vec3 ear,
-                                    float categoryGain, int audibleRange, int volumePercent) {
+                                    float categoryGain, int audibleRange, int volumePercent,
+                                    long referenceNanos) {
             this.volumePercent = Math.max(0, Math.min(100, volumePercent));
             double distance = Math.sqrt(distanceSqToCenter(this.pos, ear));
             float range = Math.max(8, Math.min(48, audibleRange));
@@ -532,81 +657,59 @@ public final class SpeakerAudio {
                 return;
             }
             if (!located.track().equals(this.loadedTrack)) {
-                this.load(located.track(), located.offsetSeconds());
+                this.load(located.track(), located.offsetSeconds(), referenceNanos);
                 return;
             }
-            if (this.buffer < 0) {
+            if (this.shared == null) {
                 return;
             }
+            // 本 tick 里前面音响的解码耗时会推迟后面音响的处理，比较时要把这部分时间算进去 喵
+            double expected = located.offsetSeconds()
+                    + (System.nanoTime() - referenceNanos) / 1_000_000_000.0;
             if (AL10.alGetSourcei(this.source, AL10.AL_SOURCE_STATE) != AL10.AL_PLAYING) {
-                this.seek(located.offsetSeconds());
+                this.seek(expected);
                 AL10.alSourcePlay(this.source);
             } else {
                 float current = AL10.alGetSourcef(this.source, AL11.AL_SEC_OFFSET);
-                if (Math.abs(current - located.offsetSeconds()) > 1.0f) {
-                    this.seek(located.offsetSeconds());
+                // OpenAL 的播放位置按混音周期刷新，通常有 ~0.1 秒滞后；阈值留足余量 喵
+                if (Math.abs(current - expected) > 0.5f) {
+                    this.seek(expected);
                 }
             }
         }
 
-        private void load(Track track, double offsetSeconds) {
+        private void load(Track track, double offsetSeconds, long referenceNanos) {
+            this.releaseShared();
             this.loadedTrack = track;
-            if (this.buffer >= 0) {
-                AL10.alSourceStop(this.source);
-                AL10.alSourcei(this.source, AL10.AL_BUFFER, 0);
-                AL10.alDeleteBuffers(this.buffer);
-                this.buffer = -1;
-            }
             if (track.isFile() && !AudioSources.hasLocal(track)) {
                 requestAudio(track);
                 return;
             }
-            InputStream stream = AudioSources.open(track);
-            if (stream == null) {
+            SharedBuffer shared = acquireBuffer(track);
+            if (shared == null) {
                 return;
             }
-            try (OggAudioStream ogg = new OggAudioStream(stream)) {
-                javax.sound.sampled.AudioFormat format = ogg.getFormat();
-                ByteBuffer pcm = ogg.readAll();
-                if (pcm == null || !pcm.hasRemaining()) {
-                    return;
-                }
-                if (!pcm.isDirect()) {
-                    ByteBuffer direct = ByteBuffer.allocateDirect(pcm.remaining());
-                    direct.put(pcm.duplicate());
-                    direct.flip();
-                    pcm = direct;
-                }
-                if (pcm.remaining() > MAX_PCM_BYTES) {
-                    LOGGER.warn("音频解码后过大({} MB)，跳过播放: {}",
-                            pcm.remaining() / (1024 * 1024), track.id());
-                    if (!warnedTooBig) {
-                        warnedTooBig = true;
-                        Minecraft client = Minecraft.getInstance();
-                        if (client.player != null) {
-                            client.player.displayClientMessage(
-                                    Component.translatable("message.explainstone.audio.too_big"), false);
-                        }
-                    }
-                    return;
-                }
-                int channels = Math.max(1, format.getChannels());
-                int sampleRate = (int) format.getSampleRate();
-                if (channels > 1) {
-                    // OpenAL 不会对立体声 buffer 做 3D 定位；下混成单声道后才能听出方向 喵
-                    pcm = downmixToMono(pcm, channels);
-                    channels = 1;
-                }
-                this.durationSeconds = pcm.remaining() / (2.0 * channels * sampleRate);
-                this.buffer = AL10.alGenBuffers();
-                AL10.alBufferData(this.buffer, AL10.AL_FORMAT_MONO16, pcm, sampleRate);
-                AL10.alSourcei(this.source, AL10.AL_BUFFER, this.buffer);
-                AL10.alSourcei(this.source, AL10.AL_LOOPING, AL10.AL_FALSE);
-                this.seek(offsetSeconds);
-                AL10.alSourcePlay(this.source);
-            } catch (Exception e) {
-                LOGGER.warn("解码音频失败 {}: {}", track.id(), e.toString());
+            this.shared = shared;
+            this.durationSeconds = shared.durationSeconds;
+            AL10.alSourcei(this.source, AL10.AL_BUFFER, shared.buffer);
+            AL10.alSourcei(this.source, AL10.AL_LOOPING, AL10.AL_FALSE);
+            // 解码/上传 buffer 花掉的时间要补进偏移，否则先加载完的音响会“抢拍” 喵
+            double elapsed = (System.nanoTime() - referenceNanos) / 1_000_000_000.0;
+            this.seek(offsetSeconds + elapsed);
+            AL10.alSourcePlay(this.source);
+        }
+
+        /** 释放对共享 buffer 的引用（buffer 本身留在缓存里，下次播放不用重新解码） 喵 */
+        private void releaseShared() {
+            if (this.source >= 0) {
+                AL10.alSourceStop(this.source);
+                AL10.alSourcei(this.source, AL10.AL_BUFFER, 0);
             }
+            if (this.shared != null) {
+                releaseBuffer(this.shared);
+                this.shared = null;
+            }
+            this.durationSeconds = 0.0;
         }
 
         /** 跳到指定秒数（不改变播放/暂停状态） 喵 */
@@ -619,15 +722,10 @@ public final class SpeakerAudio {
         }
 
         private void dispose() {
+            this.releaseShared();
             if (this.source >= 0) {
-                AL10.alSourceStop(this.source);
-                AL10.alSourcei(this.source, AL10.AL_BUFFER, 0);
                 AL10.alDeleteSources(this.source);
                 this.source = -1;
-            }
-            if (this.buffer >= 0) {
-                AL10.alDeleteBuffers(this.buffer);
-                this.buffer = -1;
             }
         }
     }
