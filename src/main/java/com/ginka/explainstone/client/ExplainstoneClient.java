@@ -17,6 +17,7 @@ import com.ginka.explainstone.client.audio.SpeakerAudio;
 import net.minecraft.client.Minecraft;
 import net.minecraft.core.BlockPos;
 import net.minecraftforge.api.distmarker.Dist;
+import net.minecraftforge.client.event.sound.SoundEngineLoadEvent;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraftforge.fml.common.Mod;
 import net.minecraftforge.fml.event.lifecycle.FMLClientSetupEvent;
@@ -28,8 +29,13 @@ public final class ExplainstoneClient {
 
     @SubscribeEvent
     public static void onClientSetup(FMLClientSetupEvent event) {
-        // OpenAL 上下文是线程绑定的，必须放到客户端主线程里创建 喵
         event.enqueueWork(SpeakerAudio::init);
+    }
+
+    /** MC 重建 OpenAL context 后，我们旧的 buffer/source 名字全部失效 喵 */
+    @SubscribeEvent
+    public static void onSoundEngineLoad(SoundEngineLoadEvent event) {
+        SpeakerAudio.onSoundEngineReload();
     }
 
     /** 右键石头打开界面 喵 */

@@ -109,115 +109,84 @@ public final class SpeakerAudio {
     /** 单机 Esc 暂停时我们自己的音源也要暂停 喵 */
     private static boolean audioPaused;
 
-    private static long device;
-    private static long context;
-    private static boolean available;
+    /** 当前使用的 OpenAL context（就是 Minecraft 自己的那个） 喵 */
+    private static long usedContext;
     /** 没设备时给玩家提示一次 喵 */
-    private static boolean warnNoDevice;
+    private static boolean warnNoDevice = true;
     private static int tickCounter;
 
     private SpeakerAudio() {
     }
 
-    // ------------------------------------------------------------ OpenAL 上下文 喵
     /**
-     * Minecraft 的声音引擎会在之后把它的 OpenAL 上下文设为当前上下文。
-     * 我们每次操作自己的音源前都要切回自己的上下文，结束后再恢复，
-     * 否则 AL 调用会作用到 MC 的音源/监听器上，声音也不会按我们的坐标做空间化 喵
+     * 直接复用 Minecraft 自己的 OpenAL context / 设备。
+     * MC 的 context 是全局的，声音引擎线程也在使用它；如果我们再切到自己的 context，
+     * MC 声音引擎的 buffer/source 名字会在那一瞬间失效（AL_INVALID_NAME），
+     * 所以这里不再创建/切换上下文，只等 MC 初始化完成后直接使用 喵
      */
-    private static long pushContext() {
-        long previous = ALC10.alcGetCurrentContext();
-        if (previous != context) {
-            ALC10.alcMakeContextCurrent(context);
-        }
-        return previous;
-    }
-
-    private static void popContext(long previous) {
-        if (previous != context) {
-            ALC10.alcMakeContextCurrent(previous);
-        }
-    }
-
     public static void init() {
-        long previous = ALC10.alcGetCurrentContext();
-        try {
-            device = ALC10.alcOpenDevice((ByteBuffer) null);
-            if (device == 0L) {
-                LOGGER.warn("打不开 OpenAL 设备，讲解石将不会发声");
-                warnNoDevice = true;
-                return;
-            }
-            context = ALC10.alcCreateContext(device, (int[]) null);
-            if (context == 0L || !ALC10.alcMakeContextCurrent(context)) {
-                LOGGER.warn("创建 OpenAL 上下文失败，讲解石将不会发声");
-                warnNoDevice = true;
-                return;
-            }
-            available = true;
-        } catch (Throwable t) {
-            LOGGER.warn("初始化 OpenAL 失败: {}", t.toString());
-            available = false;
-            warnNoDevice = true;
-        } finally {
-            // 不占着当前上下文，MC 的声音引擎还要初始化它自己的 喵
-            if (ALC10.alcGetCurrentContext() == context) {
-                ALC10.alcMakeContextCurrent(previous);
-            }
-        }
+        // 等 Minecraft 声音引擎初始化完成后，tick 里会自动检测到 context 喵
     }
 
-    /** 退出世界时清掉所有音源（设备保持打开，重进世界还能继续用） 喵 */
+    /** MC 重新加载声音引擎（资源重载/切设备）时旧名字全部失效，只丢掉 AL 句柄 喵 */
+    public static void onSoundEngineReload() {
+        discardAudioHandles();
+        usedContext = 0L;
+    }
+
+    /**
+     * 只丢掉 AL 句柄（旧 context 已经销毁，不能对旧名字做任何 AL 调用）。
+     * 服务端会话/播放进度与 context 无关，保留下来，下个 tick 直接按原位置重建音源 喵
+     */
+    private static void discardAudioHandles() {
+        VOICES.clear();
+        BUFFER_CACHE.clear();
+        audioPaused = false;
+    }
+
+    /** 只丢引用，不对旧 context 的名字做任何 AL 调用 喵 */
+    private static void discardAudioState() {
+        discardAudioHandles();
+        speakers = List.of();
+        transmitters = List.of();
+        SESSIONS.clear();
+        BROADCASTS.clear();
+        REQUESTED.clear();
+        lastWorld = null;
+        wasNeedingSync = false;
+    }
+
+    /** 退出世界时清掉所有音源（MC 的 context/设备保持不动） 喵 */
     public static void reset() {
-        if (!available) {
+        long current = ALC10.alcGetCurrentContext();
+        if (current == 0L || current != usedContext) {
+            discardAudioState();
             return;
         }
-        long previous = pushContext();
-        try {
-            for (Voice voice : VOICES.values()) {
-                voice.dispose();
-            }
-            VOICES.clear();
-            clearBufferCache();
-            speakers = List.of();
-            transmitters = List.of();
-            SESSIONS.clear();
-            BROADCASTS.clear();
-            REQUESTED.clear();
-            lastWorld = null;
-            wasNeedingSync = false;
-            audioPaused = false;
-        } finally {
-            popContext(previous);
+        for (Voice voice : VOICES.values()) {
+            voice.dispose();
         }
+        VOICES.clear();
+        clearBufferCache();
+        speakers = List.of();
+        transmitters = List.of();
+        SESSIONS.clear();
+        BROADCASTS.clear();
+        REQUESTED.clear();
+        lastWorld = null;
+        wasNeedingSync = false;
+        audioPaused = false;
     }
 
     public static void shutdown() {
+        // 不要关闭 MC 的 context/设备，只清理我们自己的音源 喵
         reset();
-        if (!available) {
-            return;
-        }
-        long previous = ALC10.alcGetCurrentContext();
-        try {
-            if (previous != context) {
-                ALC10.alcMakeContextCurrent(context);
-            }
-            if (context != 0L) {
-                ALC10.alcDestroyContext(context);
-            }
-            if (device != 0L) {
-                ALC10.alcCloseDevice(device);
-            }
-        } catch (Throwable ignored) {
-        } finally {
-            ALC10.alcMakeContextCurrent(previous == context ? 0L : previous);
-            available = false;
-        }
     }
 
     // ------------------------------------------------------------------ tick
     public static void tick(Minecraft client) {
-        if (!available) {
+        long current = ALC10.alcGetCurrentContext();
+        if (current == 0L) {
             if (warnNoDevice && client.player != null) {
                 warnNoDevice = false;
                 client.player.displayClientMessage(
@@ -225,12 +194,13 @@ public final class SpeakerAudio {
             }
             return;
         }
-        long previous = pushContext();
-        try {
-            tickSounds(client);
-        } finally {
-            popContext(previous);
+        if (current != usedContext) {
+            // MC 新建/重建了 context：我们旧的 buffer/source 名字已经失效，不能再去删 喵
+            discardAudioHandles();
+            usedContext = current;
+            LOGGER.info("using Minecraft OpenAL context 0x{}", Long.toHexString(current));
         }
+        tickSounds(client);
     }
 
     private static void tickSounds(Minecraft client) {
@@ -255,7 +225,6 @@ public final class SpeakerAudio {
         if (audioPaused) {
             resumeVoices();
         }
-        updateListener(player);
         clock++;
         // 本 tick 所有音响共用一个参考时刻：解码耗时会计入偏移补偿，避免起播错开 喵
         long referenceNanos = System.nanoTime();
@@ -265,10 +234,9 @@ public final class SpeakerAudio {
             scan(world, player.blockPosition());
         }
 
-        // 用 RECORDS 分类：MC 声音设置里有独立的"唱片机"滑块，可以直接控制这类音频 喵
-        // 我们自己的 context 不会自动吃 MC 的主音量，所以这里手动乘上 喵
-        float master = client.options.getSoundSourceVolume(SoundSource.MASTER)
-                * client.options.getSoundSourceVolume(SoundSource.RECORDS);
+        // 复用 MC 的 context 后，listener 的 gain 已经由 MC 乘上主音量；
+        // 这里只乘 RECORDS（唱片机）分类音量，避免主音量乘两次 喵
+        float master = client.options.getSoundSourceVolume(SoundSource.RECORDS);
         Vec3 ear = player.getEyePosition();
 
         // 1) 广播/本地会话都由服务端推送，客户端只按 elapsedTicks 推算进度 喵
@@ -357,18 +325,6 @@ public final class SpeakerAudio {
         return VOICES.computeIfAbsent(pos, Voice::new);
     }
 
-    private static void updateListener(LocalPlayer player) {
-        Vec3 eye = player.getEyePosition();
-        Vec3 look = player.getViewVector(1.0F);
-        // 上方向也要跟着头部转动，否则仰头/低头时左右声道会判断错误 喵
-        Vec3 up = player.getUpVector(1.0F);
-        AL10.alListener3f(AL10.AL_POSITION, (float) eye.x, (float) eye.y, (float) eye.z);
-        AL10.alListenerfv(AL10.AL_ORIENTATION, new float[]{
-                (float) look.x, (float) look.y, (float) look.z,
-                (float) up.x, (float) up.y, (float) up.z});
-        AL10.alListenerf(AL10.AL_GAIN, 1.0f);   // 主音量由 source 端的 master 承担，避免重复相乘 喵
-    }
-
     /** 单机暂停：把所有正在播放的音源暂停（位置会保留） 喵 */
     private static void pauseVoices() {
         if (audioPaused) {
@@ -395,9 +351,6 @@ public final class SpeakerAudio {
     }
 
     private static void clear() {
-        if (!available) {
-            return;
-        }
         for (Voice voice : VOICES.values()) {
             voice.dispose();
         }
@@ -596,13 +549,9 @@ public final class SpeakerAudio {
                 LOGGER.warn("alGenBuffers 失败: {}", track.id());
                 return null;
             }
+            // 共享 MC 的 context 后，AL 错误状态可能混入其它线程的错误；
+            // 这里不再用 alGetError 判断（否则会出现假的“上传失败”） 喵
             AL10.alBufferData(buffer, AL10.AL_FORMAT_MONO16, pcm, sampleRate);
-            int error = AL10.alGetError();
-            if (error != AL10.AL_NO_ERROR) {
-                LOGGER.warn("上传音频 buffer 失败(0x{}): {}", Integer.toHexString(error), track.id());
-                AL10.alDeleteBuffers(buffer);
-                return null;
-            }
             SharedBuffer shared = new SharedBuffer(buffer, duration);
             shared.users = 1;
             BUFFER_CACHE.put(track.id(), shared);
@@ -650,6 +599,9 @@ public final class SpeakerAudio {
     private static final class Voice {
         private final BlockPos pos;
         private Track loadedTrack;
+        /** 解码/建 buffer 失败过的曲目，过一段时间才重试，避免每 tick 重试 喵 */
+        private Track failedTrack;
+        private long failedAt;
         private int rangeHint = 40;
         private int volumePercent = 100;
         private double durationSeconds;
@@ -704,11 +656,16 @@ public final class SpeakerAudio {
                 requestMissingAudio(tracks);
                 return;
             }
-            if (!located.track().equals(this.loadedTrack)) {
-                this.load(located.track(), located.offsetSeconds(), referenceNanos);
+            Track target = located.track();
+            if (!target.equals(this.loadedTrack) && !target.equals(this.failedTrack)) {
+                this.load(target, located.offsetSeconds(), referenceNanos);
                 return;
             }
             if (this.shared == null) {
+                // 偶发失败后等 10 秒再试，避免永久沉默或每 tick 重试 喵
+                if (target.equals(this.failedTrack) && clock - this.failedAt >= 200L) {
+                    this.failedTrack = null;
+                }
                 return;
             }
             // 本 tick 里前面音响的解码耗时会推迟后面音响的处理，比较时要把这部分时间算进去 喵
@@ -729,12 +686,16 @@ public final class SpeakerAudio {
         private void load(Track track, double offsetSeconds, long referenceNanos) {
             this.releaseShared();
             this.loadedTrack = track;
+            this.failedTrack = null;
             if (track.isFile() && !AudioSources.hasLocal(track)) {
                 requestAudio(track);
                 return;
             }
             SharedBuffer shared = acquireBuffer(track);
             if (shared == null) {
+                this.loadedTrack = null;
+                this.failedTrack = track;
+                this.failedAt = clock;
                 return;
             }
             this.shared = shared;
@@ -912,6 +873,9 @@ public final class SpeakerAudio {
         for (Voice voice : VOICES.values()) {
             if (voice.loadedTrack != null && voice.loadedTrack.isFile() && voice.loadedTrack.sha1().equals(sha1)) {
                 voice.loadedTrack = null;
+            }
+            if (voice.failedTrack != null && voice.failedTrack.isFile() && voice.failedTrack.sha1().equals(sha1)) {
+                voice.failedTrack = null;
             }
         }
     }
