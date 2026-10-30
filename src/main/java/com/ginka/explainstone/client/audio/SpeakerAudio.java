@@ -120,6 +120,12 @@ public final class SpeakerAudio {
     private static Boolean efxSupported;
     /** 遮挡射线检测间隔（tick，2 = 100ms） 喵 */
     private static final int OCCLUSION_INTERVAL = 2;
+    /** 房间重建间隔（tick，60 = 3s） 喵 */
+    private static final int ROOM_INTERVAL = 60;
+    /** 混响参数更新间隔（tick，2 = 100ms） 喵 */
+    private static final int REVERB_INTERVAL = 2;
+    /** 同一 tick 最多重建一个房间，避免多音响同时采样造成卡顿 喵 */
+    private static long lastRoomSampleTick = Long.MIN_VALUE;
     private static boolean warnedNoEfx;
 
     private SpeakerAudio() {
@@ -506,6 +512,10 @@ public final class SpeakerAudio {
         return Math.max(0.0f, Math.min(1.0f, value));
     }
 
+    private static float clamp(float value, float min, float max) {
+        return Math.max(min, Math.min(max, value));
+    }
+
     // ------------------------------------------------------------ 共享解码 buffer 喵
     /**
      * 同一首曲子只解码一次，多个音响共用同一个 OpenAL buffer。
@@ -641,6 +651,17 @@ public final class SpeakerAudio {
         private float occlusionHigh = 1.0f;
         private float broadbandOcclusion = 1.0f;
         private long occlusionAt = Long.MIN_VALUE;
+        /** 房间混响：房间参数属于音响，不随听者移动 喵 */
+        private RoomAcoustics room;
+        private long roomAt = Long.MIN_VALUE;
+        private int auxSlot = -1;
+        private int reverbEffect = -1;
+        private float reverbRtMid = 0.8f;
+        private float reverbHfRatio = 1.0f;
+        private float reverbWet = 0.0f;
+        private float reverbEffectRt = -1.0f;
+        private float reverbEffectHf = -1.0f;
+        private long reverbAt = Long.MIN_VALUE;
 
         private Voice(BlockPos pos) {
             this.pos = pos;
@@ -686,6 +707,8 @@ public final class SpeakerAudio {
 
             // 墙壁遮挡：与前后方向衰减相乘；在音响背面又隔墙就是双重衰减 喵
             this.updateOcclusion(world, ear, distance);
+            this.updateRoom(world);
+            this.updateReverb();
             AL10.alSourcef(this.source, AL10.AL_GAIN, Math.max(0.0f,
                     categoryGain * distanceGain * volumeScale * directionalGain * this.broadbandOcclusion));
 
@@ -806,6 +829,178 @@ public final class SpeakerAudio {
             }
         }
 
+        /** 每 3 秒重建一次音响所在房间；房间参数属于音响，不随听者移动 喵 */
+        private void updateRoom(ClientLevel world) {
+            if (!ExplainstoneConfig.reverbEnabled()) {
+                this.room = null;
+                return;
+            }
+            if (world == null) {
+                return;
+            }
+            if (this.roomAt != Long.MIN_VALUE && clock - this.roomAt < ROOM_INTERVAL) {
+                return;
+            }
+            // 多音响错开采样，避免同一帧连续做几百条射线 喵
+            if (lastRoomSampleTick == clock) {
+                return;
+            }
+            lastRoomSampleTick = clock;
+            this.roomAt = clock;
+            RoomAcoustics previous = this.room;
+            Vec3 source = new Vec3(this.pos.getX() + 0.5, this.pos.getY() + 0.5, this.pos.getZ() + 0.5);
+            try {
+                this.room = RoomSampler.sample(world, source,
+                        ExplainstoneConfig.reverbMaxRoomDistance());
+            } catch (Throwable t) {
+                this.room = null;
+                LOGGER.warn("房间混响采样失败: {}", t.toString());
+            }
+            if (previous == null && this.room != null) {
+                LOGGER.info("[reverb] room detected at {}: V={} S={} RT={}/{}",
+                        this.pos, this.room.volume(), this.room.surfaceArea(),
+                        this.room.rt60Low(), this.room.rt60High());
+            } else if (previous != null && this.room == null) {
+                LOGGER.info("[reverb] room lost at {}", this.pos);
+            } else if (previous != null && this.room != null
+                    && Math.abs(previous.volume() - this.room.volume()) > 0.5) {
+                LOGGER.info("[reverb] room changed at {}: V={} -> {} RT={}/{}",
+                        this.pos, previous.volume(), this.room.volume(),
+                        this.room.rt60Low(), this.room.rt60High());
+            }
+        }
+
+        /** 平滑房间参数，并更新 EFX 混响；湿声会随直达声遮挡略微衰减但保留更多 喵 */
+        private void updateReverb() {
+            if (!efxSupported() || this.source < 0) {
+                return;
+            }
+            long now = clock;
+            if (this.reverbAt != Long.MIN_VALUE
+                    && now - this.reverbAt < REVERB_INTERVAL) {
+                return;
+            }
+            long previous = this.reverbAt;
+            this.reverbAt = now;
+            float lambda = previous == Long.MIN_VALUE ? 1.0f
+                    : (float) (1.0 - Math.exp(-Math.max(1L, now - previous) / 20.0 / 0.25));
+
+            float targetRt = this.room != null ? (float) this.room.rt60Mid() : 0.0f;
+            float targetHf = 1.0f;
+            float targetWet = 0.0f;
+            if (this.room != null) {
+                if (this.room.rt60Mid() > 1.0E-4) {
+                    targetHf = clamp((float) (this.room.rt60High() / this.room.rt60Mid()), 0.1f, 2.0f);
+                }
+                // 混响路径的遮挡比直达声宽松：保留一部分低频间接声 喵
+                float lenient = (float) Math.sqrt(clamp01(this.occlusionLow));
+                targetWet = clamp01((float) (ExplainstoneConfig.reverbWet()
+                        * (0.35 + 0.65 * lenient)));
+            }
+
+            this.reverbRtMid += (targetRt - this.reverbRtMid) * lambda;
+            this.reverbHfRatio += (targetHf - this.reverbHfRatio) * lambda;
+            this.reverbWet += (targetWet - this.reverbWet) * lambda;
+
+            if (this.reverbWet < 0.002f) {
+                this.disableReverb();
+                return;
+            }
+
+            this.ensureReverbSlot();
+            if (this.auxSlot < 0) {
+                return;
+            }
+            EXTEfx.alAuxiliaryEffectSlotf(this.auxSlot, EXTEfx.AL_EFFECTSLOT_GAIN,
+                    clamp01(this.reverbWet));
+            if (this.room != null) {
+                this.updateReverbEffect(this.reverbRtMid, this.reverbHfRatio);
+            }
+        }
+
+        private void ensureReverbSlot() {
+            if (this.auxSlot >= 0 || this.source < 0) {
+                return;
+            }
+            try {
+                int slot = EXTEfx.alGenAuxiliaryEffectSlots();
+                if (slot == 0) {
+                    return;
+                }
+                EXTEfx.alAuxiliaryEffectSlotf(slot, EXTEfx.AL_EFFECTSLOT_GAIN,
+                        clamp01(this.reverbWet));
+                AL11.alSource3i(this.source, EXTEfx.AL_AUXILIARY_SEND_FILTER,
+                        slot, 0, EXTEfx.AL_FILTER_NULL);
+                this.auxSlot = slot;
+                this.reverbEffect = -1;
+                this.reverbEffectRt = -1.0f;
+                this.reverbEffectHf = -1.0f;
+            } catch (Throwable t) {
+                LOGGER.warn("创建 EFX 混响辅助槽失败: {}", t.toString());
+            }
+        }
+
+        private void updateReverbEffect(float rt, float hfRatio) {
+            if (this.auxSlot < 0) {
+                return;
+            }
+            if (this.reverbEffect >= 0
+                    && Math.abs(rt - this.reverbEffectRt) < 0.01f
+                    && Math.abs(hfRatio - this.reverbEffectHf) < 0.01f) {
+                return;
+            }
+            try {
+                int effect = EXTEfx.alGenEffects();
+                if (effect == 0) {
+                    return;
+                }
+                EXTEfx.alEffecti(effect, EXTEfx.AL_EFFECT_TYPE, EXTEfx.AL_EFFECT_REVERB);
+                EXTEfx.alEffectf(effect, EXTEfx.AL_REVERB_DENSITY, 1.0f);
+                EXTEfx.alEffectf(effect, EXTEfx.AL_REVERB_DIFFUSION, 1.0f);
+                EXTEfx.alEffectf(effect, EXTEfx.AL_REVERB_GAIN,
+                        clamp01((float) ExplainstoneConfig.reverbGain()));
+                EXTEfx.alEffectf(effect, EXTEfx.AL_REVERB_GAINHF,
+                        clamp01((float) ExplainstoneConfig.reverbGainHF()));
+                EXTEfx.alEffectf(effect, EXTEfx.AL_REVERB_DECAY_TIME,
+                        clamp(rt, 0.1f, 20.0f));
+                EXTEfx.alEffectf(effect, EXTEfx.AL_REVERB_DECAY_HFRATIO,
+                        clamp(hfRatio, 0.1f, 2.0f));
+                // 参数必须在绑定到 slot 前设好（OpenAL Soft 会在绑定时固定） 喵
+                EXTEfx.alAuxiliaryEffectSloti(this.auxSlot, EXTEfx.AL_EFFECTSLOT_EFFECT, effect);
+                int oldEffect = this.reverbEffect;
+                this.reverbEffect = effect;
+                this.reverbEffectRt = rt;
+                this.reverbEffectHf = hfRatio;
+                if (oldEffect >= 0) {
+                    EXTEfx.alDeleteEffects(oldEffect);
+                } else {
+                    LOGGER.info("[reverb] EFX reverb active at {}: rt={} hf={} wet={}",
+                            this.pos, rt, hfRatio, this.reverbWet);
+                }
+            } catch (Throwable t) {
+                LOGGER.warn("更新 EFX 混响效果失败: {}", t.toString());
+            }
+        }
+
+        private void disableReverb() {
+            if (this.auxSlot >= 0) {
+                if (this.source >= 0) {
+                    AL11.alSource3i(this.source, EXTEfx.AL_AUXILIARY_SEND_FILTER, 0, 0, 0);
+                }
+                EXTEfx.alAuxiliaryEffectSloti(this.auxSlot, EXTEfx.AL_EFFECTSLOT_EFFECT,
+                        EXTEfx.AL_EFFECTSLOT_NULL);
+                EXTEfx.alDeleteAuxiliaryEffectSlots(this.auxSlot);
+                this.auxSlot = -1;
+            }
+            if (this.reverbEffect >= 0) {
+                EXTEfx.alDeleteEffects(this.reverbEffect);
+                this.reverbEffect = -1;
+            }
+            this.reverbEffectRt = -1.0f;
+            this.reverbEffectHf = -1.0f;
+            this.reverbWet = 0.0f;
+        }
+
         private void load(Track track, double offsetSeconds, long referenceNanos) {
             this.releaseShared();
             this.loadedTrack = track;
@@ -855,6 +1050,7 @@ public final class SpeakerAudio {
 
         private void dispose() {
             this.releaseShared();
+            this.disableReverb();
             if (this.filter >= 0) {
                 if (this.source >= 0) {
                     AL10.alSourcei(this.source, EXTEfx.AL_DIRECT_FILTER, 0);

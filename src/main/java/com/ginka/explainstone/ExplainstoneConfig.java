@@ -51,6 +51,34 @@ public final class ExplainstoneConfig {
                     "Client-side effect; does not affect playback synchronization.")
             .define("soundOcclusion", true);
 
+    /** 是否启用房间混响 喵 */
+    public static final ForgeConfigSpec.BooleanValue REVERB_ENABLED = BUILDER
+            .comment("Enable room reverb for speakers inside an enclosed room.",
+                    "The room acoustics are estimated on the client from the blocks around each speaker.",
+                    "Client-side effect; it does not affect playback synchronization.")
+            .define("reverbEnabled", true);
+
+    /** 房间采样射线的最大距离（格） 喵 */
+    public static final ForgeConfigSpec.DoubleValue REVERB_MAX_ROOM_DISTANCE = BUILDER
+            .comment("Maximum distance used when sampling the room around a speaker.",
+                    "Rooms larger than this may be treated as open/outdoor and get no reverb.")
+            .defineInRange("reverbMaxRoomDistance", 48.0, 8.0, 128.0);
+
+    /** EFX Reverb 效果器总增益 喵 */
+    public static final ForgeConfigSpec.DoubleValue REVERB_GAIN = BUILDER
+            .comment("EFX reverb effect gain (0.0 - 1.0).")
+            .defineInRange("reverbGain", 0.3, 0.0, 1.0);
+
+    /** EFX Reverb 高频增益 喵 */
+    public static final ForgeConfigSpec.DoubleValue REVERB_GAIN_HF = BUILDER
+            .comment("EFX reverb high-frequency gain (0.0 - 1.0).")
+            .defineInRange("reverbGainHF", 0.8, 0.0, 1.0);
+
+    /** EFX 辅助发送的湿声增益 喵 */
+    public static final ForgeConfigSpec.DoubleValue REVERB_WET = BUILDER
+            .comment("Wet return level for the reverb auxiliary send (0.0 - 1.0).")
+            .defineInRange("reverbWet", 0.8, 0.0, 1.0);
+
     public static final ForgeConfigSpec SPEC = BUILDER.build();
 
     private ExplainstoneConfig() {
@@ -74,5 +102,30 @@ public final class ExplainstoneConfig {
     /** 是否启用墙壁遮挡衰减 喵 */
     public static boolean soundOcclusion() {
         return SOUND_OCCLUSION.get();
+    }
+
+    /** 是否启用房间混响 喵 */
+    public static boolean reverbEnabled() {
+        return REVERB_ENABLED.get();
+    }
+
+    /** 房间采样最大距离 喵 */
+    public static double reverbMaxRoomDistance() {
+        return REVERB_MAX_ROOM_DISTANCE.get();
+    }
+
+    /** EFX Reverb 总增益 喵 */
+    public static double reverbGain() {
+        return REVERB_GAIN.get();
+    }
+
+    /** EFX Reverb 高频增益 喵 */
+    public static double reverbGainHF() {
+        return REVERB_GAIN_HF.get();
+    }
+
+    /** 混响湿声增益 喵 */
+    public static double reverbWet() {
+        return REVERB_WET.get();
     }
 }

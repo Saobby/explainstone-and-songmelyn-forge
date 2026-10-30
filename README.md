@@ -25,6 +25,10 @@ Port of the Fabric 1.21.1 edition of **Explainstone / Songmelyn / Broadcast Tran
   available a low-pass filter additionally muffles the highs, otherwise only the
   broadband attenuation is used. Closed doors and trapdoors block their cell but remain
   incomplete blocks (square-root transmission); open ones are treated as air.
+* Room reverb: each speaker samples its surrounding room with an icosphere ray grid,
+  estimates volume/surface area/absorption and RT60, and drives an OpenAL EFX reverb
+  auxiliary send. Room parameters belong to the speaker and are rebuilt periodically.
+  Fully open/outdoor areas do not get reverb.
 
 ## Build
 
@@ -54,6 +58,14 @@ audibleRangeAtFullVolume = 40
 rearVolumeFactor = 0.25
 # Attenuate direct sound through blocks between the speaker and the listener.
 soundOcclusion = true
+# Room reverb for enclosed spaces.
+reverbEnabled = true
+# Maximum room sampling distance in blocks.
+reverbMaxRoomDistance = 48.0
+# EFX reverb effect gain / high-frequency gain, and wet return level.
+reverbGain = 0.3
+reverbGainHF = 0.8
+reverbWet = 0.8
 ```
 
 ## Differences from the Fabric edition
