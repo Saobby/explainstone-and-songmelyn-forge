@@ -36,6 +36,8 @@ public final class SoundMaterials {
     private static final Map<Block, SoundMaterial> OVERRIDES = new HashMap<>();
     private static final Map<Block, SoundMaterial> CACHE = new HashMap<>();
     private static final Map<SoundType, SoundMaterial> BY_SOUND = new HashMap<>();
+    /** 无法识别的方块 / 自定义 SoundType 的最终回退值 喵 */
+    public static final SoundMaterial FALLBACK = SoundMaterial.STONE;
 
     static {
         register(Blocks.BRICKS, SoundMaterial.BRICK);
@@ -86,6 +88,86 @@ public final class SoundMaterials {
         BY_SOUND.put(SoundType.WEEPING_VINES, SoundMaterial.LEAVES);
         BY_SOUND.put(SoundType.TWISTING_VINES, SoundMaterial.LEAVES);
         BY_SOUND.put(SoundType.LILY_PAD, SoundMaterial.LEAVES);
+
+        // 其余原版 SoundType：保证每个原版方块都能得到明确材质 喵
+        BY_SOUND.put(SoundType.EMPTY, SoundMaterial.AIR);
+        BY_SOUND.put(SoundType.AMETHYST, SoundMaterial.STONE);
+        BY_SOUND.put(SoundType.AMETHYST_CLUSTER, SoundMaterial.STONE);
+        BY_SOUND.put(SoundType.LARGE_AMETHYST_BUD, SoundMaterial.STONE);
+        BY_SOUND.put(SoundType.MEDIUM_AMETHYST_BUD, SoundMaterial.STONE);
+        BY_SOUND.put(SoundType.SMALL_AMETHYST_BUD, SoundMaterial.STONE);
+        BY_SOUND.put(SoundType.ANCIENT_DEBRIS, SoundMaterial.METAL);
+        BY_SOUND.put(SoundType.AZALEA, SoundMaterial.LEAVES);
+        BY_SOUND.put(SoundType.AZALEA_LEAVES, SoundMaterial.LEAVES);
+        BY_SOUND.put(SoundType.FLOWERING_AZALEA, SoundMaterial.LEAVES);
+        BY_SOUND.put(SoundType.BIG_DRIPLEAF, SoundMaterial.LEAVES);
+        BY_SOUND.put(SoundType.SMALL_DRIPLEAF, SoundMaterial.LEAVES);
+        BY_SOUND.put(SoundType.CAVE_VINES, SoundMaterial.LEAVES);
+        BY_SOUND.put(SoundType.CHERRY_LEAVES, SoundMaterial.LEAVES);
+        BY_SOUND.put(SoundType.CHERRY_SAPLING, SoundMaterial.LEAVES);
+        BY_SOUND.put(SoundType.FUNGUS, SoundMaterial.LEAVES);
+        BY_SOUND.put(SoundType.FROGLIGHT, SoundMaterial.LEAVES);
+        BY_SOUND.put(SoundType.FROGSPAWN, SoundMaterial.LEAVES);
+        BY_SOUND.put(SoundType.GLOW_LICHEN, SoundMaterial.LEAVES);
+        BY_SOUND.put(SoundType.HANGING_ROOTS, SoundMaterial.LEAVES);
+        BY_SOUND.put(SoundType.MANGROVE_ROOTS, SoundMaterial.LEAVES);
+        BY_SOUND.put(SoundType.MUDDY_MANGROVE_ROOTS, SoundMaterial.LEAVES);
+        BY_SOUND.put(SoundType.NETHER_SPROUTS, SoundMaterial.LEAVES);
+        BY_SOUND.put(SoundType.NETHER_WART, SoundMaterial.LEAVES);
+        BY_SOUND.put(SoundType.PINK_PETALS, SoundMaterial.LEAVES);
+        BY_SOUND.put(SoundType.SCULK_VEIN, SoundMaterial.LEAVES);
+        BY_SOUND.put(SoundType.SHROOMLIGHT, SoundMaterial.LEAVES);
+        BY_SOUND.put(SoundType.SPORE_BLOSSOM, SoundMaterial.LEAVES);
+        BY_SOUND.put(SoundType.STEM, SoundMaterial.LEAVES);
+        BY_SOUND.put(SoundType.WART_BLOCK, SoundMaterial.LEAVES);
+
+        BY_SOUND.put(SoundType.BAMBOO_WOOD_HANGING_SIGN, SoundMaterial.WOOD);
+        BY_SOUND.put(SoundType.CHERRY_WOOD_HANGING_SIGN, SoundMaterial.WOOD);
+        BY_SOUND.put(SoundType.NETHER_WOOD_HANGING_SIGN, SoundMaterial.WOOD);
+        BY_SOUND.put(SoundType.HANGING_SIGN, SoundMaterial.WOOD);
+        BY_SOUND.put(SoundType.CHISELED_BOOKSHELF, SoundMaterial.WOOD);
+
+        BY_SOUND.put(SoundType.LANTERN, SoundMaterial.METAL);
+        BY_SOUND.put(SoundType.CHAIN, SoundMaterial.METAL);
+        BY_SOUND.put(SoundType.LODESTONE, SoundMaterial.METAL);
+
+        BY_SOUND.put(SoundType.CANDLE, SoundMaterial.WOOL);
+        BY_SOUND.put(SoundType.SCULK, SoundMaterial.WOOL);
+        BY_SOUND.put(SoundType.SCULK_CATALYST, SoundMaterial.WOOL);
+        BY_SOUND.put(SoundType.SCULK_SENSOR, SoundMaterial.WOOL);
+        BY_SOUND.put(SoundType.SCULK_SHRIEKER, SoundMaterial.WOOL);
+        BY_SOUND.put(SoundType.MOSS_CARPET, SoundMaterial.CARPET);
+        BY_SOUND.put(SoundType.MOSS, SoundMaterial.LEAVES);
+
+        BY_SOUND.put(SoundType.BASALT, SoundMaterial.STONE);
+        BY_SOUND.put(SoundType.BONE_BLOCK, SoundMaterial.STONE);
+        BY_SOUND.put(SoundType.CALCITE, SoundMaterial.STONE);
+        BY_SOUND.put(SoundType.CORAL_BLOCK, SoundMaterial.STONE);
+        BY_SOUND.put(SoundType.DEEPSLATE, SoundMaterial.STONE);
+        BY_SOUND.put(SoundType.DEEPSLATE_BRICKS, SoundMaterial.STONE);
+        BY_SOUND.put(SoundType.DEEPSLATE_TILES, SoundMaterial.STONE);
+        BY_SOUND.put(SoundType.DRIPSTONE_BLOCK, SoundMaterial.STONE);
+        BY_SOUND.put(SoundType.POINTED_DRIPSTONE, SoundMaterial.STONE);
+        BY_SOUND.put(SoundType.POLISHED_DEEPSLATE, SoundMaterial.STONE);
+        BY_SOUND.put(SoundType.TUFF, SoundMaterial.STONE);
+        BY_SOUND.put(SoundType.GILDED_BLACKSTONE, SoundMaterial.STONE);
+        BY_SOUND.put(SoundType.NETHERRACK, SoundMaterial.STONE);
+        BY_SOUND.put(SoundType.NETHER_ORE, SoundMaterial.STONE);
+        BY_SOUND.put(SoundType.NETHER_GOLD_ORE, SoundMaterial.STONE);
+
+        BY_SOUND.put(SoundType.DECORATED_POT, SoundMaterial.BRICK);
+        BY_SOUND.put(SoundType.DECORATED_POT_CRACKED, SoundMaterial.BRICK);
+        BY_SOUND.put(SoundType.MUD_BRICKS, SoundMaterial.BRICK);
+        BY_SOUND.put(SoundType.NETHER_BRICKS, SoundMaterial.BRICK);
+
+        BY_SOUND.put(SoundType.MUD, SoundMaterial.DIRT);
+        BY_SOUND.put(SoundType.PACKED_MUD, SoundMaterial.DIRT);
+        BY_SOUND.put(SoundType.ROOTED_DIRT, SoundMaterial.DIRT);
+        BY_SOUND.put(SoundType.SOUL_SOIL, SoundMaterial.DIRT);
+        BY_SOUND.put(SoundType.SOUL_SAND, SoundMaterial.SAND);
+        BY_SOUND.put(SoundType.SUSPICIOUS_SAND, SoundMaterial.SAND);
+        BY_SOUND.put(SoundType.SUSPICIOUS_GRAVEL, SoundMaterial.GRAVEL);
+        BY_SOUND.put(SoundType.NYLIUM, SoundMaterial.GRASS);
     }
 
     private SoundMaterials() {
@@ -97,9 +179,23 @@ public final class SoundMaterials {
         CACHE.clear();
     }
 
-    public static SoundMaterial of(BlockState state, LevelReader level, BlockPos pos) {
-        Block block = state.getBlock();
+    /** 给自定义 SoundType 注册声学材质（适用于其他模组的方块） 喵 */
+    public static void register(SoundType soundType, SoundMaterial material) {
+        BY_SOUND.put(soundType, material);
+        CACHE.clear();
+    }
 
+    public static SoundMaterial of(BlockState state, LevelReader level, BlockPos pos) {
+        try {
+            return ofInternal(state, state.getBlock(), level, pos);
+        } catch (Throwable t) {
+            // 其他模组的异常方块/自定义 SoundType 不应导致声音或房间采样崩溃 喵
+            return FALLBACK;
+        }
+    }
+
+    private static SoundMaterial ofInternal(BlockState state, Block block,
+                                            LevelReader level, BlockPos pos) {
         // 打开的门 / 活板门视为空气 喵
         if (block instanceof DoorBlock && state.getValue(BlockStateProperties.OPEN)) {
             return SoundMaterial.AIR;
@@ -153,6 +249,95 @@ public final class SoundMaterials {
 
         var key = ForgeRegistries.BLOCKS.getKey(block);
         String path = key == null ? "" : key.getPath();
+
+        // 名称规则补充：SoundType 相同但声学上应区分开的方块 喵
+        if (path.contains("sculk_vein")) {
+            return SoundMaterial.LEAVES;
+        }
+        if (path.contains("sculk")) {
+            return SoundMaterial.WOOL;
+        }
+        if (path.contains("amethyst")) {
+            return SoundMaterial.STONE;
+        }
+        if (path.contains("coral")) {
+            return SoundMaterial.STONE;
+        }
+        if (path.contains("bone")) {
+            return SoundMaterial.STONE;
+        }
+        if (path.contains("ice")) {
+            return SoundMaterial.GLASS;
+        }
+        if (path.contains("glowstone") || path.contains("sea_lantern")
+                || path.contains("beacon")) {
+            return SoundMaterial.GLASS;
+        }
+        if (path.contains("candle") || path.contains("cake")
+                || path.contains("shulker_box") || path.contains("honey")) {
+            return SoundMaterial.WOOL;
+        }
+        if (path.contains("jack_o_lantern")) {
+            return SoundMaterial.LEAVES;
+        }
+        if (path.equals("lantern") || path.equals("soul_lantern")
+                || path.equals("chain") || path.contains("lodestone")
+                || path.contains("ancient_debris")) {
+            return SoundMaterial.METAL;
+        }
+        if (path.contains("bookshelf") || path.endsWith("_sign")) {
+            return SoundMaterial.WOOD;
+        }
+        if (path.contains("bamboo_block") || path.contains("bamboo_mosaic")) {
+            return SoundMaterial.WOOD;
+        }
+        if (path.contains("decorated_pot")) {
+            return SoundMaterial.BRICK;
+        }
+        if (path.contains("soul_soil")) {
+            return SoundMaterial.DIRT;
+        }
+        if (path.equals("moss_block")) {
+            return SoundMaterial.LEAVES;
+        }
+        if (path.contains("moss_carpet")) {
+            return SoundMaterial.CARPET;
+        }
+        if (path.contains("mushroom_stem")) {
+            return SoundMaterial.WOOD;
+        }
+        if (path.contains("crimson_stem") || path.contains("warped_stem")) {
+            return SoundMaterial.LOG;
+        }
+        if (path.contains("azalea") || path.contains("dripleaf")
+                || path.contains("spore_blossom") || path.contains("pink_petals")
+                || path.contains("froglight") || path.contains("frogspawn")
+                || path.contains("shroomlight") || path.contains("wart")
+                || path.contains("vine") || path.contains("roots")
+                || path.contains("glow_lichen") || path.contains("stem")) {
+            return SoundMaterial.LEAVES;
+        }
+        if (path.contains("nylium")) {
+            return SoundMaterial.GRASS;
+        }
+        if (path.contains("hay_block") || path.contains("target")) {
+            return SoundMaterial.GRASS;
+        }
+        if (path.contains("dried_kelp")) {
+            return SoundMaterial.LEAVES;
+        }
+        if (path.contains("cactus") || path.contains("pumpkin")
+                || path.contains("melon") || path.contains("cocoa")) {
+            return SoundMaterial.LEAVES;
+        }
+        if (path.contains("purpur") || path.contains("prismarine")
+                || path.contains("obsidian") || path.contains("magma")) {
+            return SoundMaterial.STONE;
+        }
+        if (path.endsWith("_ore")) {
+            return SoundMaterial.STONE;
+        }
+
         if (path.contains("concrete")) {
             return SoundMaterial.CONCRETE;
         }
@@ -176,7 +361,7 @@ public final class SoundMaterials {
         }
         if (path.contains("stone_brick") || path.contains("deepslate_brick")
                 || path.contains("blackstone_brick") || path.contains("sandstone")
-                || path.contains("terracotta")) {
+                || path.contains("terracotta") || path.contains("quartz")) {
             return SoundMaterial.STONE;
         }
         if (path.contains("brick")) {
@@ -209,6 +394,6 @@ public final class SoundMaterials {
         }
 
         SoundMaterial bySound = BY_SOUND.get(state.getSoundType());
-        return bySound == null ? SoundMaterial.STONE : bySound;
+        return bySound == null ? FALLBACK : bySound;
     }
 }

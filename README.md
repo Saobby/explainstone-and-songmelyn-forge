@@ -29,6 +29,11 @@ Port of the Fabric 1.21.1 edition of **Explainstone / Songmelyn / Broadcast Tran
   estimates volume/surface area/absorption and RT60, and drives an OpenAL EFX reverb
   auxiliary send. Room parameters belong to the speaker and are rebuilt periodically.
   Fully open/outdoor areas do not get reverb.
+* Acoustic material coverage: all 103 vanilla `SoundType`s are mapped; tags and
+  block-name rules refine special cases (wool, concrete, ice, sculk, plants, etc.).
+  Unknown or modded custom sound types fall back to `STONE`. Other mods can call
+  `SoundMaterials.register(Block, SoundMaterial)` or
+  `SoundMaterials.register(SoundType, SoundMaterial)` to override it.
 
 ## Build
 
