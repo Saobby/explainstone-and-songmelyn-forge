@@ -46,6 +46,7 @@ import java.io.InputStream;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
@@ -116,6 +117,8 @@ public final class SpeakerAudio {
     /** 没设备时给玩家提示一次 喵 */
     private static boolean warnNoDevice = true;
     private static int tickCounter;
+    /** 本 tick 新加载、等待统一 seek + 批量起播的音源 喵 */
+    private static final List<Voice> PENDING_STARTS = new ArrayList<>();
     /** EFX 是否可用（每个 context 重新检测一次） 喵 */
     private static Boolean efxSupported;
     /** 遮挡射线检测间隔（tick，2 = 100ms） 喵 */
@@ -153,6 +156,7 @@ public final class SpeakerAudio {
      */
     private static void discardAudioHandles() {
         VOICES.clear();
+        PENDING_STARTS.clear();
         BUFFER_CACHE.clear();
         audioPaused = false;
         efxSupported = null;
@@ -194,6 +198,7 @@ public final class SpeakerAudio {
             voice.dispose();
         }
         VOICES.clear();
+        PENDING_STARTS.clear();
         clearBufferCache();
         speakers = List.of();
         transmitters = List.of();
@@ -306,6 +311,9 @@ public final class SpeakerAudio {
             }
         }
 
+        // 所有本 tick 新加载的音源统一 seek，再批量起播，避免各自解码/起播造成一前一后 喵
+        flushPendingStarts();
+
         // 3.5) 刚缺会话时立即要一次；之后每 2 秒定期校正/重试 喵
         boolean urgent = needSync && !wasNeedingSync;
         wasNeedingSync = needSync;
@@ -352,6 +360,45 @@ public final class SpeakerAudio {
         return VOICES.computeIfAbsent(pos, Voice::new);
     }
 
+    /**
+     * 同一 tick 内新加载的所有音响：用同一个现在时刻计算目标偏移，
+     * 先全部 seek，再用一次 alSourcePlayv 批量起播，尽量让它们在同一混音周期开始。 喵
+     */
+    private static void flushPendingStarts() {
+        if (PENDING_STARTS.isEmpty()) {
+            return;
+        }
+        long now = System.nanoTime();
+        int[] sources = new int[PENDING_STARTS.size()];
+        int count = 0;
+        for (Voice voice : PENDING_STARTS) {
+            if (voice.source < 0) {
+                continue;
+            }
+            double target = voice.pendingOffset
+                    + (now - voice.pendingReferenceNanos) / 1_000_000_000.0;
+            voice.seek(target);
+            sources[count++] = voice.source;
+        }
+        if (count > 0) {
+            if (count != sources.length) {
+                sources = Arrays.copyOf(sources, count);
+            }
+            try {
+                AL10.alSourcePlayv(sources);
+            } catch (Throwable t) {
+                // 极少数旧的 OpenAL 实现缺 alSourcePlayv 时退回逐个起播 喵
+                for (int source : sources) {
+                    AL10.alSourcePlay(source);
+                }
+            }
+            if (count > 1) {
+                LOGGER.debug("[sync] batched start of {} voices", count);
+            }
+        }
+        PENDING_STARTS.clear();
+    }
+
     /** 单机暂停：把所有正在播放的音源暂停（位置会保留） 喵 */
     private static void pauseVoices() {
         if (audioPaused) {
@@ -382,6 +429,7 @@ public final class SpeakerAudio {
             voice.dispose();
         }
         VOICES.clear();
+        PENDING_STARTS.clear();
         clearBufferCache();
         speakers = List.of();
         transmitters = List.of();
@@ -662,6 +710,9 @@ public final class SpeakerAudio {
         private float reverbEffectRt = -1.0f;
         private float reverbEffectHf = -1.0f;
         private long reverbAt = Long.MIN_VALUE;
+        /** 新曲加载后的统一 seek / 起播参数 喵 */
+        private double pendingOffset;
+        private long pendingReferenceNanos;
 
         private Voice(BlockPos pos) {
             this.pos = pos;
@@ -734,8 +785,12 @@ public final class SpeakerAudio {
             double expected = located.offsetSeconds()
                     + (System.nanoTime() - referenceNanos) / 1_000_000_000.0;
             if (AL10.alGetSourcei(this.source, AL10.AL_SOURCE_STATE) != AL10.AL_PLAYING) {
-                this.seek(expected);
-                AL10.alSourcePlay(this.source);
+                // 需要重新起播的音源也加入本 tick 的统一批量起播，避免暂停/重载后错位 喵
+                this.pendingOffset = located.offsetSeconds();
+                this.pendingReferenceNanos = referenceNanos;
+                if (!PENDING_STARTS.contains(this)) {
+                    PENDING_STARTS.add(this);
+                }
             } else {
                 float current = AL10.alGetSourcef(this.source, AL11.AL_SEC_OFFSET);
                 // OpenAL 的播放位置按混音周期刷新，通常有 ~0.1 秒滞后；阈值留足余量 喵
@@ -1006,6 +1061,8 @@ public final class SpeakerAudio {
             this.loadedTrack = track;
             this.failedTrack = null;
             if (track.isFile() && !AudioSources.hasLocal(track)) {
+                // 文件还没下载完：不要记住 loadedTrack，否则文件到了也不会重试 喵
+                this.loadedTrack = null;
                 requestAudio(track);
                 return;
             }
@@ -1020,10 +1077,12 @@ public final class SpeakerAudio {
             this.durationSeconds = shared.durationSeconds;
             AL10.alSourcei(this.source, AL10.AL_BUFFER, shared.buffer);
             AL10.alSourcei(this.source, AL10.AL_LOOPING, AL10.AL_FALSE);
-            // 解码/上传 buffer 花掉的时间要补进偏移，否则先加载完的音响会“抢拍” 喵
-            double elapsed = (System.nanoTime() - referenceNanos) / 1_000_000_000.0;
-            this.seek(offsetSeconds + elapsed);
-            AL10.alSourcePlay(this.source);
+            // 先不单独 seek/play；等本 tick 所有音响都加载完，再统一 seek + 批量起播 喵
+            this.pendingOffset = offsetSeconds;
+            this.pendingReferenceNanos = referenceNanos;
+            if (!PENDING_STARTS.contains(this)) {
+                PENDING_STARTS.add(this);
+            }
         }
 
         /** 释放对共享 buffer 的引用（buffer 本身留在缓存里，下次播放不用重新解码） 喵 */
@@ -1049,6 +1108,7 @@ public final class SpeakerAudio {
         }
 
         private void dispose() {
+            PENDING_STARTS.remove(this);
             this.releaseShared();
             this.disableReverb();
             if (this.filter >= 0) {
