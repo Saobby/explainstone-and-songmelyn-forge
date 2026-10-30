@@ -16,8 +16,10 @@ Port of the Fabric 1.21.1 edition of **Explainstone / Songmelyn / Broadcast Tran
   longer restarts the song.
 * One volume slider controls both loudness and audible range:
   `effective range = audibleRangeAtFullVolume × volume / 100`.
-* Directional attenuation: sound is full volume in front of the grille, quieter
-  behind it (configurable via `rearVolumeFactor`).
+* Directional attenuation: volume follows the 3D angle between the speaker-to-listener
+  vector and the grille direction. Directly in front is loudest; behind is quieter
+  (configurable via `rearVolumeFactor`); standing above the speaker is quieter than
+  standing directly in front at the same level.
 * Direct-sound occlusion: walls and other blocks between the speaker and the listener
   attenuate the sound. The low-frequency attenuation is always applied; with OpenAL EFX
   available a low-pass filter additionally muffles the highs, otherwise only the

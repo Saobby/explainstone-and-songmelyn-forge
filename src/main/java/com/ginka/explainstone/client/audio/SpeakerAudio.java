@@ -671,11 +671,14 @@ public final class SpeakerAudio {
                     ? 0.0f : (float) (1.0 - distance / range);
             float volumeScale = this.volumePercent / 100.0f;
 
-            // 前后方向衰减：网罩正前方 1.0，正后方取配置值，侧面线性过渡 喵
+            // 用完整三维向量求与喇叭朝向的夹角余弦：正前方最大，正后方最小；
+            // 垂直分量也参与，所以站在音响上方/上方靠前会比站在正前方轻。 喵
             float directionalGain = 1.0f;
-            double horizontal = Math.sqrt(dx * dx + dz * dz);
-            if (facing != null && horizontal > 1.0E-4) {
-                double dot = (dx * facing.getStepX() + dz * facing.getStepZ()) / horizontal;
+            if (facing != null && distance > 1.0E-4) {
+                double dot = (dx * facing.getStepX()
+                        + dy * facing.getStepY()
+                        + dz * facing.getStepZ()) / distance;
+                dot = Math.max(-1.0, Math.min(1.0, dot));
                 double t = Math.max(0.0, Math.min(1.0, (dot + 1.0) * 0.5));
                 double rear = Math.max(0.0, Math.min(1.0, ExplainstoneConfig.rearVolumeFactor()));
                 directionalGain = (float) (rear + (1.0 - rear) * t);
