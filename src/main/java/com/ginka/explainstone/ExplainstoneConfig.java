@@ -44,6 +44,13 @@ public final class ExplainstoneConfig {
                     "Client-side only; it does not affect playback synchronization.")
             .defineInRange("rearVolumeFactor", 0.25, 0.0, 1.0);
 
+    /** 是否启用直达声遮挡（墙壁会减弱声音） 喵 */
+    public static final ForgeConfigSpec.BooleanValue SOUND_OCCLUSION = BUILDER
+            .comment("Attenuate direct sound when blocks are between a speaker and the listener.",
+                    "High frequencies are reduced more than low frequencies when OpenAL EFX is available.",
+                    "Client-side effect; does not affect playback synchronization.")
+            .define("soundOcclusion", true);
+
     public static final ForgeConfigSpec SPEC = BUILDER.build();
 
     private ExplainstoneConfig() {
@@ -62,5 +69,10 @@ public final class ExplainstoneConfig {
     /** 正后方音量倍率 喵 */
     public static double rearVolumeFactor() {
         return REAR_VOLUME_FACTOR.get();
+    }
+
+    /** 是否启用墙壁遮挡衰减 喵 */
+    public static boolean soundOcclusion() {
+        return SOUND_OCCLUSION.get();
     }
 }

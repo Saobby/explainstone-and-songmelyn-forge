@@ -36,7 +36,9 @@ import net.minecraft.world.level.chunk.LevelChunkSection;
 import net.minecraft.world.phys.Vec3;
 import org.lwjgl.openal.AL10;
 import org.lwjgl.openal.AL11;
+import org.lwjgl.openal.ALC;
 import org.lwjgl.openal.ALC10;
+import org.lwjgl.openal.EXTEfx;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -114,6 +116,11 @@ public final class SpeakerAudio {
     /** 没设备时给玩家提示一次 喵 */
     private static boolean warnNoDevice = true;
     private static int tickCounter;
+    /** EFX 是否可用（每个 context 重新检测一次） 喵 */
+    private static Boolean efxSupported;
+    /** 遮挡射线检测间隔（tick，2 = 100ms） 喵 */
+    private static final int OCCLUSION_INTERVAL = 2;
+    private static boolean warnedNoEfx;
 
     private SpeakerAudio() {
     }
@@ -142,6 +149,8 @@ public final class SpeakerAudio {
         VOICES.clear();
         BUFFER_CACHE.clear();
         audioPaused = false;
+        efxSupported = null;
+        warnedNoEfx = false;
     }
 
     /** 只丢引用，不对旧 context 的名字做任何 AL 调用 喵 */
@@ -154,6 +163,18 @@ public final class SpeakerAudio {
         REQUESTED.clear();
         lastWorld = null;
         wasNeedingSync = false;
+    }
+
+    /** 当前 context 是否支持 EFX（用于低通滤波） 喵 */
+    private static boolean efxSupported() {
+        if (efxSupported == null) {
+            try {
+                efxSupported = ALC.getCapabilities().ALC_EXT_EFX;
+            } catch (Throwable t) {
+                efxSupported = false;
+            }
+        }
+        return efxSupported;
     }
 
     /** 退出世界时清掉所有音源（MC 的 context/设备保持不动） 喵 */
@@ -263,7 +284,7 @@ public final class SpeakerAudio {
                     continue;
                 }
                 active.add(pos);
-                voice(pos).updateTimeline(info.tracks(), info.mode(), info.elapsedTicks(), ear, master,
+                voice(pos).updateTimeline(info.tracks(), info.mode(), info.elapsedTicks(), world, ear, master,
                         be.getEffectiveAudibleRange(), be.getVolume(), facing, referenceNanos);
                 spawnNotes(world, pos);
             } else if (isPlaying(world, pos)) {
@@ -273,7 +294,7 @@ public final class SpeakerAudio {
                     continue;
                 }
                 active.add(pos);
-                voice(pos).updateTimeline(session.tracks(), session.mode(), session.elapsedTicks(), ear, master,
+                voice(pos).updateTimeline(session.tracks(), session.mode(), session.elapsedTicks(), world, ear, master,
                         be.getEffectiveAudibleRange(), be.getVolume(), facing, referenceNanos);
                 spawnNotes(world, pos);
             }
@@ -481,6 +502,10 @@ public final class SpeakerAudio {
         return mono;
     }
 
+    private static float clamp01(float value) {
+        return Math.max(0.0f, Math.min(1.0f, value));
+    }
+
     // ------------------------------------------------------------ 共享解码 buffer 喵
     /**
      * 同一首曲子只解码一次，多个音响共用同一个 OpenAL buffer。
@@ -608,6 +633,14 @@ public final class SpeakerAudio {
         private int source;
         /** 共享的 OpenAL buffer（多个音响可以指向同一个） 喵 */
         private SharedBuffer shared;
+        /** 直达声遮挡：EFX 低通滤波器 + 平滑后的振幅增益 喵 */
+        private int filter = -1;
+        /** 当前 filter 绑定时的 GAINHF；OpenAL Soft 在 attach 时固定参数，需要重新绑定 喵 */
+        private float filterHf = 1.0f;
+        private float occlusionLow = 1.0f;
+        private float occlusionHigh = 1.0f;
+        private float broadbandOcclusion = 1.0f;
+        private long occlusionAt = Long.MIN_VALUE;
 
         private Voice(BlockPos pos) {
             this.pos = pos;
@@ -624,8 +657,8 @@ public final class SpeakerAudio {
          * 按服务端时间轴更新音源：定位当前曲目与偏移。
          * 同一首歌已经在放就只做小幅度纠偏，不打断声音 喵
          */
-        private void updateTimeline(List<Track> tracks, PlayMode mode, long elapsedTicks, Vec3 ear,
-                                    float categoryGain, double audibleRange, int volumePercent,
+        private void updateTimeline(List<Track> tracks, PlayMode mode, long elapsedTicks, ClientLevel world,
+                                    Vec3 ear, float categoryGain, double audibleRange, int volumePercent,
                                     Direction facing, long referenceNanos) {
             this.volumePercent = Math.max(0, Math.min(100, volumePercent));
             double dx = ear.x - (this.pos.getX() + 0.5);
@@ -647,8 +680,11 @@ public final class SpeakerAudio {
                 double rear = Math.max(0.0, Math.min(1.0, ExplainstoneConfig.rearVolumeFactor()));
                 directionalGain = (float) (rear + (1.0 - rear) * t);
             }
+
+            // 墙壁遮挡：与前后方向衰减相乘；在音响背面又隔墙就是双重衰减 喵
+            this.updateOcclusion(world, ear, distance);
             AL10.alSourcef(this.source, AL10.AL_GAIN, Math.max(0.0f,
-                    categoryGain * distanceGain * volumeScale * directionalGain));
+                    categoryGain * distanceGain * volumeScale * directionalGain * this.broadbandOcclusion));
 
             Located located = locate(tracks, mode, elapsedTicks);
             if (located == null) {
@@ -680,6 +716,90 @@ public final class SpeakerAudio {
                 if (Math.abs(current - expected) > 0.5f) {
                     this.seek(expected);
                 }
+            }
+        }
+
+        /**
+         * 每 100ms 做一次直达声遮挡射线检测，并对增益做指数平滑。
+         * 低频/高频分别计算；有 EFX 时用 low-pass filter，没有则退回宽带衰减 喵
+         */
+        private void updateOcclusion(ClientLevel world, Vec3 ear, double distance) {
+            if (world == null || distance < 1.0E-3) {
+                return;
+            }
+            long now = clock;
+            if (this.occlusionAt != Long.MIN_VALUE
+                    && now - this.occlusionAt < OCCLUSION_INTERVAL) {
+                return;
+            }
+            long previous = this.occlusionAt;
+            this.occlusionAt = now;
+
+            Vec3 source = new Vec3(this.pos.getX() + 0.5, this.pos.getY() + 0.5, this.pos.getZ() + 0.5);
+            AcousticRaycast.Occlusion target = AcousticRaycast.sample(world, source, ear);
+            float low = (float) Math.sqrt(Math.max(0.0, Math.min(1.0, target.lowEnergy())));
+            float high = (float) Math.sqrt(Math.max(0.0, Math.min(1.0, target.highEnergy())));
+
+            float lambda = previous == Long.MIN_VALUE ? 1.0f
+                    : (float) (1.0 - Math.exp(-Math.max(1L, now - previous) / 20.0 / 0.15));
+            this.occlusionLow += (low - this.occlusionLow) * lambda;
+            this.occlusionHigh += (high - this.occlusionHigh) * lambda;
+            this.applyOcclusion();
+        }
+
+        private void applyOcclusion() {
+            float lowGain = clamp01(this.occlusionLow);
+            float highGain = clamp01(this.occlusionHigh);
+            float hf = lowGain <= 1.0E-4f ? 0.0f : clamp01(highGain / lowGain);
+
+            // 低频衰减始终直接乘在 AL_GAIN 上：即使 EFX 不工作也一定能听到“变轻” 喵
+            this.broadbandOcclusion = lowGain;
+            this.applyHighFrequencyFilter(hf);
+        }
+
+        /**
+         * OpenAL Soft 1.23.1 在 AL_DIRECT_FILTER 绑定时固定滤波器参数，
+         * 绑定后再改 GAINHF 不会生效；所以参数变化时要用新 filter 重新绑定。 喵
+         */
+        private void applyHighFrequencyFilter(float hf) {
+            if (!efxSupported()) {
+                if (!warnedNoEfx) {
+                    warnedNoEfx = true;
+                    LOGGER.info("[occl] EFX unavailable; using broadband attenuation fallback");
+                }
+                return;
+            }
+            if (hf >= 0.999f) {
+                if (this.filter >= 0) {
+                    AL10.alSourcei(this.source, EXTEfx.AL_DIRECT_FILTER, 0);
+                    EXTEfx.alDeleteFilters(this.filter);
+                    this.filter = -1;
+                }
+                this.filterHf = 1.0f;
+                return;
+            }
+            if (this.filter >= 0 && Math.abs(hf - this.filterHf) < 0.002f) {
+                return;
+            }
+            try {
+                int newFilter = EXTEfx.alGenFilters();
+                if (newFilter == 0) {
+                    return;
+                }
+                EXTEfx.alFilteri(newFilter, EXTEfx.AL_FILTER_TYPE, EXTEfx.AL_FILTER_LOWPASS);
+                // filter 自身只负责高频相对衰减；低频衰减已经由 AL_GAIN 承担 喵
+                EXTEfx.alFilterf(newFilter, EXTEfx.AL_LOWPASS_GAIN, 1.0f);
+                EXTEfx.alFilterf(newFilter, EXTEfx.AL_LOWPASS_GAINHF, hf);
+                AL10.alSourcei(this.source, EXTEfx.AL_DIRECT_FILTER, newFilter);
+                int oldFilter = this.filter;
+                this.filter = newFilter;
+                this.filterHf = hf;
+                if (oldFilter >= 0) {
+                    EXTEfx.alDeleteFilters(oldFilter);
+                }
+            } catch (Throwable t) {
+                efxSupported = false;
+                LOGGER.warn("OpenAL EFX 不可用，退回宽带遮挡: {}", t.toString());
             }
         }
 
@@ -732,6 +852,13 @@ public final class SpeakerAudio {
 
         private void dispose() {
             this.releaseShared();
+            if (this.filter >= 0) {
+                if (this.source >= 0) {
+                    AL10.alSourcei(this.source, EXTEfx.AL_DIRECT_FILTER, 0);
+                }
+                EXTEfx.alDeleteFilters(this.filter);
+                this.filter = -1;
+            }
             if (this.source >= 0) {
                 AL10.alDeleteSources(this.source);
                 this.source = -1;

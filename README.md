@@ -18,6 +18,11 @@ Port of the Fabric 1.21.1 edition of **Explainstone / Songmelyn / Broadcast Tran
   `effective range = audibleRangeAtFullVolume × volume / 100`.
 * Directional attenuation: sound is full volume in front of the grille, quieter
   behind it (configurable via `rearVolumeFactor`).
+* Direct-sound occlusion: walls and other blocks between the speaker and the listener
+  attenuate the sound. The low-frequency attenuation is always applied; with OpenAL EFX
+  available a low-pass filter additionally muffles the highs, otherwise only the
+  broadband attenuation is used. Closed doors and trapdoors block their cell but remain
+  incomplete blocks (square-root transmission); open ones are treated as air.
 
 ## Build
 
@@ -45,6 +50,8 @@ broadcastRequiresOp = false
 audibleRangeAtFullVolume = 40
 # Volume multiplier directly behind a speaker (0.0 = silent, 1.0 = disabled).
 rearVolumeFactor = 0.25
+# Attenuate direct sound through blocks between the speaker and the listener.
+soundOcclusion = true
 ```
 
 ## Differences from the Fabric edition
