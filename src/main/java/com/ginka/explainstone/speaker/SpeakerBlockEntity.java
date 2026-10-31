@@ -43,8 +43,6 @@ public class SpeakerBlockEntity extends BlockEntity {
     private int channel = 234;
     /** 收信模式：只听广播，不放自己的列表 喵 */
     private boolean receiveMode;
-    /** 本机是否放音（关掉后即使收信成功也不出声） 喵 */
-    private boolean speakerEnabled = true;
     /** 发信器信号传播距离（格），32-512 喵 */
     private int transmitRange = 512;
     /** 本机音量百分比 0-100 喵 */
@@ -182,15 +180,6 @@ public class SpeakerBlockEntity extends BlockEntity {
         this.sync();
     }
 
-    public boolean isSpeakerEnabled() {
-        return this.speakerEnabled;
-    }
-
-    public void setSpeakerEnabled(boolean enabled) {
-        this.speakerEnabled = enabled;
-        this.sync();
-    }
-
     public int getTransmitRange() {
         return this.transmitRange;
     }
@@ -284,7 +273,6 @@ public class SpeakerBlockEntity extends BlockEntity {
         nbt.putInt("channel", this.channel);
         nbt.putBoolean("receiveMode", this.receiveMode);
         nbt.putInt("timerSeconds", this.timerSeconds);
-        nbt.putBoolean("speakerEnabled", this.speakerEnabled);
         nbt.putInt("transmitRange", this.transmitRange);
         nbt.putInt("volume", this.volume);
     }
@@ -319,9 +307,6 @@ public class SpeakerBlockEntity extends BlockEntity {
         }
         if (nbt.contains("timerSeconds")) {
             this.timerSeconds = Math.max(0, nbt.getInt("timerSeconds"));
-        }
-        if (nbt.contains("speakerEnabled")) {
-            this.speakerEnabled = nbt.getBoolean("speakerEnabled");
         }
         if (nbt.contains("transmitRange")) {
             this.transmitRange = Math.max(32, Math.min(512, nbt.getInt("transmitRange")));

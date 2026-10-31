@@ -257,9 +257,16 @@ public final class SpeakerNetworking {
                 be.stopTimer();
             }
             case SpeakerPayloads.ACTION_SET_CHANNEL -> be.setChannel(payload.value());
-            case SpeakerPayloads.ACTION_TOGGLE_RECEIVE -> be.setReceiveMode(!be.isReceiveMode());
+            case SpeakerPayloads.ACTION_TOGGLE_RECEIVE -> {
+                be.setReceiveMode(!be.isReceiveMode());
+                if (be.isReceiveMode()) {
+                    // 切到收信就停掉本机自播放：避免标题还显示"播放中"、红石输出也一直亮着 喵
+                    setPlaying(level, pos, false);
+                    be.stopTimer();
+                    PlaybackRegistry.stop(level, pos);
+                }
+            }
             case SpeakerPayloads.ACTION_SET_TIMER -> be.setTimerSeconds(payload.value());
-            case SpeakerPayloads.ACTION_TOGGLE_ENABLED -> be.setSpeakerEnabled(!be.isSpeakerEnabled());
             case SpeakerPayloads.ACTION_SET_TRANSMIT_RANGE -> be.setTransmitRange(payload.value());
             case SpeakerPayloads.ACTION_SET_VOLUME -> be.setVolume(payload.value());
             case SpeakerPayloads.ACTION_PLAY_INDEX -> {

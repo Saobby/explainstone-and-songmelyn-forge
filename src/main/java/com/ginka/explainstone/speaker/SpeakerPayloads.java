@@ -34,8 +34,6 @@ public final class SpeakerPayloads {
     public static final int ACTION_TOGGLE_RECEIVE = 8;
     /** 设置定时播放秒数（value = 0/60/180/600） 喵 */
     public static final int ACTION_SET_TIMER = 9;
-    /** 切换本机是否放音 喵 */
-    public static final int ACTION_TOGGLE_ENABLED = 10;
     /** 设置发信器传播距离（value = 32..512） 喵 */
     public static final int ACTION_SET_TRANSMIT_RANGE = 11;
     /** 设置本机音量（value = 0..100，同时决定可闻范围） 喵 */

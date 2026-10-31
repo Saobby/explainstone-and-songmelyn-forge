@@ -79,7 +79,6 @@ public class SpeakerScreen extends Screen {
     private Button modeButton;
     private Button redstoneButton;
     private Button playModeButton;
-    private Button enableButton;
     private Button importButton;
     private Button removeButton;
     private Button deleteAllButton;
@@ -148,6 +147,7 @@ public class SpeakerScreen extends Screen {
         this.panelW = Math.min(PANEL_W, Math.max(220, this.width - 16));
         this.left = (this.width - this.panelW) / 2;
         int half = this.panelW / 2 - 2;
+        boolean transmitter = this.isTransmitter();
 
         // ---- 从底部往上排，保证永远放得下（窗口很矮时自动压缩行距）---- 喵
         int gap = this.height < 260 ? 20 : GAP;
@@ -194,41 +194,36 @@ public class SpeakerScreen extends Screen {
                         b -> send(SpeakerPayloads.ACTION_STOP, 0))
                 .bounds(this.left + half + 4, this.row1, half, BTN_H).build());
 
-        // 收信开关（发信器则是定时） 喵
-        this.modeButton = this.addRenderableWidget(Button.builder(Component.translatable("screen.explainstone.button.receive"), b -> {
-            if (this.isTransmitter()) {
-                int[] steps = {0, 60, 180, 600};
-                SpeakerBlockEntity be = this.speaker();
-                int current = be == null ? 0 : be.getTimerSeconds();
-                int next = steps[0];
-                for (int i = 0; i < steps.length; i++) {
-                    if (steps[i] == current) {
-                        next = steps[(i + 1) % steps.length];
-                        break;
+        // 定时（只有发信器用；讲解石/颂美铃用顶部标签页切换自播放/收信，不再需要底部收信开关） 喵
+        this.modeButton = transmitter
+                ? this.addRenderableWidget(Button.builder(Component.translatable("screen.explainstone.timer.off"), b -> {
+                    int[] steps = {0, 60, 180, 600};
+                    SpeakerBlockEntity be = this.speaker();
+                    int current = be == null ? 0 : be.getTimerSeconds();
+                    int next = steps[0];
+                    for (int i = 0; i < steps.length; i++) {
+                        if (steps[i] == current) {
+                            next = steps[(i + 1) % steps.length];
+                            break;
+                        }
                     }
-                }
-                send(SpeakerPayloads.ACTION_SET_TIMER, next);
-            } else {
-                send(SpeakerPayloads.ACTION_TOGGLE_RECEIVE, 0);
-            }
-            this.refreshLabels();
-        }).bounds(this.left, this.row2, half, BTN_H).build());
+                    send(SpeakerPayloads.ACTION_SET_TIMER, next);
+                    this.refreshLabels();
+                }).bounds(this.left, this.row2, half, BTN_H).build())
+                : null;
 
+        // 讲解石没有收信开关了，红石按钮独占整行；发信器仍和定时按钮分左右 喵
         this.redstoneButton = this.addRenderableWidget(Button.builder(Component.translatable("screen.explainstone.button.redstone"), b -> {
             send(SpeakerPayloads.ACTION_TOGGLE_REDSTONE, 0);
             this.refreshLabels();
-        }).bounds(this.left + half + 4, this.row2, half, BTN_H).build());
+        }).bounds(transmitter ? this.left + half + 4 : this.left, this.row2,
+                transmitter ? half : this.panelW, BTN_H).build());
 
-        // 播放模式 喵
+        // 播放模式（放音开关已移除：把音量调到 0 就是静音） 喵
         this.playModeButton = this.addRenderableWidget(Button.builder(Component.translatable("screen.explainstone.button.mode"), b -> {
             send(SpeakerPayloads.ACTION_CYCLE_MODE, 0);
             this.refreshLabels();
-        }).bounds(this.left, this.row3, half, BTN_H).build());
-
-        // 放音开关（只有讲解石/颂美铃） 喵
-        this.enableButton = this.addRenderableWidget(Button.builder(Component.translatable("screen.explainstone.button.enable"),
-                        b -> send(SpeakerPayloads.ACTION_TOGGLE_ENABLED, 0))
-                .bounds(this.left + half + 4, this.row3, half, BTN_H).build());
+        }).bounds(this.left, this.row3, this.panelW, BTN_H).build());
 
         // 导入 / 删除选中 / 删除全部 喵
         int third = Math.max(60, (this.panelW - 8) / 3);
@@ -281,8 +276,8 @@ public class SpeakerScreen extends Screen {
             send(SpeakerPayloads.ACTION_SET_CHANNEL, DEFAULT_CHANNEL);
         }).bounds(this.left + 162, this.channelY - 1, 56, BTN_H).build());
 
-        // 滑块：发信器保留信号范围；音响只用音量（音量同时决定可闻范围） 喵
-        if (this.isTransmitter()) {
+        // 滑块：发信器保留信号范围；音响只用音量（音量同时决定可闻范围，0 即静音） 喵
+        if (transmitter) {
             int value = be == null ? 512 : be.getTransmitRange();
             this.rangeSlider = this.addRenderableWidget(new IntSlider(this.left, this.sliderY, this.panelW, BTN_H,
                     Component.translatable("screen.explainstone.slider.range").getString(), 32, 512, value, this::queueRange));
@@ -383,16 +378,10 @@ public class SpeakerScreen extends Screen {
                     : Component.translatable("screen.explainstone.tab.receive"));
         }
         if (this.modeButton != null) {
-            if (transmitter) {
-                int timer = be == null ? 0 : be.getTimerSeconds();
-                this.modeButton.setMessage(timer <= 0
-                        ? Component.translatable("screen.explainstone.timer.off")
-                        : Component.translatable("screen.explainstone.timer.minutes", timer / 60));
-            } else {
-                this.modeButton.setMessage(receive
-                        ? Component.translatable("screen.explainstone.receive.on")
-                        : Component.translatable("screen.explainstone.receive.off"));
-            }
+            int timer = be == null ? 0 : be.getTimerSeconds();
+            this.modeButton.setMessage(timer <= 0
+                    ? Component.translatable("screen.explainstone.timer.off")
+                    : Component.translatable("screen.explainstone.timer.minutes", timer / 60));
         }
         if (this.redstoneButton != null) {
             boolean respect = be == null || be.isRespectRedstone();
@@ -407,13 +396,6 @@ public class SpeakerScreen extends Screen {
                             : Component.translatable("screen.explainstone.mode." + be.getMode().getSerializedName())));
             this.playModeButton.visible = !receive;
         }
-        if (this.enableButton != null) {
-            boolean enabled = be == null || be.isSpeakerEnabled();
-            this.enableButton.setMessage(enabled
-                    ? Component.translatable("screen.explainstone.enable.on")
-                    : Component.translatable("screen.explainstone.enable.off"));
-            this.enableButton.visible = !transmitter;
-        }
         if (this.playButton != null) {
             this.playButton.visible = !receive;
         }
@@ -425,6 +407,10 @@ public class SpeakerScreen extends Screen {
         }
         if (this.removeButton != null) {
             this.removeButton.visible = !receive;
+        }
+        if (this.deleteAllButton != null) {
+            // 收信模式下列表是广播内容，不能在这里删本机的曲目 喵
+            this.deleteAllButton.visible = !receive;
         }
         boolean showChannel = transmitter || receive;
         if (this.channelField != null) {
@@ -551,7 +537,8 @@ public class SpeakerScreen extends Screen {
             }
             context.drawString(this.font, ellipsize(status, this.panelW),
                     this.left, this.hintY, 0xFFD37A, true);
-        } else if (this.hintY >= this.listTop + ROW_H) {
+        } else if (!receive && this.hintY >= this.listTop + ROW_H) {
+            // 收信模式下列表显示的是频道广播，不能再提示"点击选择曲目" 喵
             context.drawString(this.font,
                     Component.translatable("screen.explainstone.list.hint", tracks.size()),
                     this.left, this.hintY, 0x909090, true);

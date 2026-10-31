@@ -33,7 +33,9 @@ Port of the Fabric 1.21.1 edition of **Explainstone / Songmelyn / Broadcast Tran
   offset from that timeline, so all players are in sync and leaving/re-entering range no
   longer restarts the song.
 * One volume slider controls both loudness and audible range:
-  `effective range = audibleRangeAtFullVolume × volume / 100`.
+  `effective range = audibleRangeAtFullVolume × volume / 100`. Setting it to 0 mutes the
+  speaker, so there is no separate sound on/off toggle. Local playback vs. receive mode is
+  chosen with the tabs at the top of the screen.
 * Directional attenuation: volume follows the 3D angle between the speaker-to-listener
   vector and the grille direction. Directly in front is loudest; behind is quieter
   (configurable via `rearVolumeFactor`); standing above the speaker is quieter than

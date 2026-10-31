@@ -285,9 +285,6 @@ public final class SpeakerAudio {
             if (!(world.getBlockEntity(pos) instanceof SpeakerBlockEntity be)) {
                 continue;
             }
-            if (!be.isSpeakerEnabled()) {
-                continue;   // 这台讲解石被单独关掉了放音 喵
-            }
             Direction facing = be.getBlockState().getValue(SpeakerBlock.FACING);
             if (be.isReceiveMode()) {
                 BroadcastInfo info = broadcasts.get(be.getChannel());
