@@ -53,17 +53,19 @@ public final class BroadcastRegistry {
         final int selected;
         final PlayMode mode;
         final List<Track> order;
+        final int[] durations;
         final long startGameTime;
         final long revision;
         int range;
 
         private Entry(int channel, List<Track> sourceTracks, int selected, PlayMode mode, List<Track> order,
-                      long startGameTime, long revision, int range) {
+                      int[] durations, long startGameTime, long revision, int range) {
             this.channel = channel;
             this.sourceTracks = sourceTracks;
             this.selected = selected;
             this.mode = mode;
             this.order = order;
+            this.durations = durations;
             this.startGameTime = startGameTime;
             this.revision = revision;
             this.range = range;
@@ -118,7 +120,8 @@ public final class BroadcastRegistry {
             map.remove(pos);
             return;
         }
-        Entry entry = new Entry(channel, tracks, selected, mode, order, level.getGameTime(), ++REVISION, range);
+        Entry entry = new Entry(channel, tracks, selected, mode, order,
+                SpeakerNetworking.trackDurations(level, order), level.getGameTime(), ++REVISION, range);
         map.put(pos.immutable(), entry);
         LOGGER.info("broadcast session start pos={} ch={} mode={} order={} rev={}",
                 pos.toShortString(), channel, mode, order.size(), entry.revision);
@@ -162,7 +165,7 @@ public final class BroadcastRegistry {
         for (Entry entry : map.values()) {
             for (ServerPlayer player : level.players()) {
                 SpeakerNetworking.sendToPlayer(player, new SpeakerPayloads.Broadcast(
-                        entry.channel, 0, false, "", entry.elapsedTicks(level), entry.revision));
+                        entry.channel, 0, false, "", new int[0], entry.elapsedTicks(level), entry.revision));
             }
         }
         map.clear();
@@ -178,7 +181,7 @@ public final class BroadcastRegistry {
 
     private static void send(Entry entry, ServerLevel level, ServerPlayer player) {
         SpeakerNetworking.sendToPlayer(player, new SpeakerPayloads.Broadcast(entry.channel,
-                entry.mode.ordinal(), true, PlaybackRegistry.encode(entry.order),
+                entry.mode.ordinal(), true, PlaybackRegistry.encode(entry.order), entry.durations,
                 entry.elapsedTicks(level), entry.revision));
     }
 
@@ -187,7 +190,7 @@ public final class BroadcastRegistry {
         for (ServerPlayer player : level.players()) {
             if (player.blockPosition().distSqr(pos) <= (double) entry.range * entry.range) {
                 SpeakerNetworking.sendToPlayer(player, new SpeakerPayloads.Broadcast(
-                        entry.channel, 0, false, "", elapsed, entry.revision));
+                        entry.channel, 0, false, "", new int[0], elapsed, entry.revision));
             }
         }
     }

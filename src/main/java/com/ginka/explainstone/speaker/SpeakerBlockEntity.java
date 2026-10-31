@@ -85,6 +85,9 @@ public class SpeakerBlockEntity extends BlockEntity {
     }
 
     public int addTrack(Track track) {
+        if (this.tracks.size() >= ExplainstoneConfig.maxPlaylistTracks()) {
+            return -1;
+        }
         this.tracks.add(track);
         this.sync();
         return this.tracks.size() - 1;

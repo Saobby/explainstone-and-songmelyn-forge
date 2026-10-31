@@ -82,15 +82,16 @@ public final class SpeakerAudio {
      * 服务端会话的客户端副本：记住收到时的已播放 tick，再用本地 tick 时钟往后推。
      * 这样即使中途离开范围、重进世界，进度也会继续，而不是从 0 开始。 喵
      */
-    private record SyncSession(List<Track> tracks, PlayMode mode, long elapsedTicksAtReceive,
-                               long receivedClock, long revision) {
+    private record SyncSession(List<Track> tracks, int[] durations, PlayMode mode,
+                               long elapsedTicksAtReceive, long receivedClock, long revision) {
         private long elapsedTicks() {
             return this.elapsedTicksAtReceive + Math.max(0L, clock - this.receivedClock);
         }
     }
 
-    private record BroadcastInfo(PlayMode mode, List<Track> tracks, long elapsedTicksAtReceive,
-                                 long receivedClock, long revision, long lastSeenClock) {
+    private record BroadcastInfo(PlayMode mode, List<Track> tracks, int[] durations,
+                                 long elapsedTicksAtReceive, long receivedClock,
+                                 long revision, long lastSeenClock) {
         private long elapsedTicks() {
             return this.elapsedTicksAtReceive + Math.max(0L, clock - this.receivedClock);
         }
@@ -295,8 +296,8 @@ public final class SpeakerAudio {
                     continue;
                 }
                 active.add(pos);
-                voice(pos).updateTimeline(info.tracks(), info.mode(), info.elapsedTicks(), world, ear, master,
-                        be.getEffectiveAudibleRange(), be.getVolume(), facing, referenceNanos);
+                voice(pos).updateTimeline(info.tracks(), info.durations(), info.mode(), info.elapsedTicks(),
+                        world, ear, master, be.getEffectiveAudibleRange(), be.getVolume(), facing, referenceNanos);
                 spawnNotes(world, pos);
             } else if (isPlaying(world, pos)) {
                 SyncSession session = SESSIONS.get(pos);
@@ -305,8 +306,8 @@ public final class SpeakerAudio {
                     continue;
                 }
                 active.add(pos);
-                voice(pos).updateTimeline(session.tracks(), session.mode(), session.elapsedTicks(), world, ear, master,
-                        be.getEffectiveAudibleRange(), be.getVolume(), facing, referenceNanos);
+                voice(pos).updateTimeline(session.tracks(), session.durations(), session.mode(), session.elapsedTicks(),
+                        world, ear, master, be.getEffectiveAudibleRange(), be.getVolume(), facing, referenceNanos);
                 spawnNotes(world, pos);
             }
         }
@@ -729,9 +730,9 @@ public final class SpeakerAudio {
          * 按服务端时间轴更新音源：定位当前曲目与偏移。
          * 同一首歌已经在放就只做小幅度纠偏，不打断声音 喵
          */
-        private void updateTimeline(List<Track> tracks, PlayMode mode, long elapsedTicks, ClientLevel world,
-                                    Vec3 ear, float categoryGain, double audibleRange, int volumePercent,
-                                    Direction facing, long referenceNanos) {
+        private void updateTimeline(List<Track> tracks, int[] durations, PlayMode mode, long elapsedTicks,
+                                    ClientLevel world, Vec3 ear, float categoryGain, double audibleRange,
+                                    int volumePercent, Direction facing, long referenceNanos) {
             this.volumePercent = Math.max(0, Math.min(100, volumePercent));
             double dx = ear.x - (this.pos.getX() + 0.5);
             double dy = ear.y - (this.pos.getY() + 0.5);
@@ -763,13 +764,25 @@ public final class SpeakerAudio {
             AL10.alSourcef(this.source, AL10.AL_GAIN, Math.max(0.0f,
                     categoryGain * distanceGain * volumeScale * directionalGain * this.broadbandOcclusion));
 
-            Located located = locate(tracks, mode, elapsedTicks);
+            Located located = locate(tracks, mode, elapsedTicks, durations);
             if (located == null) {
-                // 还有曲目没下载/时长未知，先把文件都请求回来 喵
-                requestMissingAudio(tracks);
+                // 时长元数据不完整时只尝试第一首，绝不一次拉取整个播放列表 喵
+                if (!tracks.isEmpty()) {
+                    Track first = tracks.get(0);
+                    if (first.isFile() && !AudioSources.hasLocal(first)) {
+                        requestAudio(first);
+                    }
+                }
                 return;
             }
             Track target = located.track();
+            if (target.isFile() && !AudioSources.hasLocal(target)) {
+                // 当前曲没下载完：先只拉当前曲；开始播放后再预取下一首 喵
+                requestAudio(target);
+                return;
+            }
+            requestNextTrack(tracks, mode, located.index());
+
             if (!target.equals(this.loadedTrack) && !target.equals(this.failedTrack)) {
                 this.load(target, located.offsetSeconds(), referenceNanos);
                 return;
@@ -1139,12 +1152,15 @@ public final class SpeakerAudio {
         }
     }
 
-    /** 顺序里还有没下载到本地的文件就都请求一遍 喵 */
-    private static void requestMissingAudio(List<Track> tracks) {
-        for (Track track : tracks) {
-            if (track.isFile() && !AudioSources.hasLocal(track)) {
-                requestAudio(track);
-            }
+    /** 当前曲已在播/可播放时，只预取顺序中的下一首 喵 */
+    private static void requestNextTrack(List<Track> tracks, PlayMode mode, int currentIndex) {
+        if (mode == PlayMode.REPEAT_ONE || tracks.size() <= 1) {
+            return;
+        }
+        int nextIndex = Math.floorMod(currentIndex + 1, tracks.size());
+        Track next = tracks.get(nextIndex);
+        if (next.isFile() && !AudioSources.hasLocal(next)) {
+            requestAudio(next);
         }
     }
 
@@ -1153,12 +1169,13 @@ public final class SpeakerAudio {
      * 再逐首累加找出当前曲目和曲内偏移。播放顺序已经由服务端固定好，
      * 所以顺序/随机/单曲循环都共用这一套算法。 喵
      */
-    private static Located locate(List<Track> tracks, PlayMode mode, long elapsedTicks) {
+    private static Located locate(List<Track> tracks, PlayMode mode, long elapsedTicks,
+                                  int[] serverDurations) {
         if (tracks.isEmpty()) {
             return null;
         }
         if (mode == PlayMode.REPEAT_ONE) {
-            int duration = AudioSources.durationSeconds(tracks.get(0));
+            int duration = durationSeconds(tracks.get(0), serverDurations, 0);
             if (duration <= 0) {
                 return null;
             }
@@ -1168,7 +1185,7 @@ public final class SpeakerAudio {
         int[] durations = new int[tracks.size()];
         double total = 0.0;
         for (int i = 0; i < tracks.size(); i++) {
-            int duration = AudioSources.durationSeconds(tracks.get(i));
+            int duration = durationSeconds(tracks.get(i), serverDurations, i);
             if (duration <= 0) {
                 return null;
             }
@@ -1188,13 +1205,22 @@ public final class SpeakerAudio {
         return new Located(tracks.get(last), last, 0.0, durations[last]);
     }
 
+    /** 优先使用服务端随会话下发的时长，未知时退回本地文件解析 喵 */
+    private static int durationSeconds(Track track, int[] serverDurations, int index) {
+        if (serverDurations != null && index >= 0 && index < serverDurations.length
+                && serverDurations[index] > 0) {
+            return serverDurations[index];
+        }
+        return AudioSources.durationSeconds(track);
+    }
+
     /** 播放进度：{已播秒, 总秒}；没有会话/时长未知返回 null 喵 */
     public static float[] progress(BlockPos pos) {
         SyncSession session = SESSIONS.get(pos);
         if (session == null) {
             return null;
         }
-        Located located = locate(session.tracks(), session.mode(), session.elapsedTicks());
+        Located located = locate(session.tracks(), session.mode(), session.elapsedTicks(), session.durations());
         return located == null ? null
                 : new float[]{(float) located.offsetSeconds(), (float) located.durationSeconds()};
     }
@@ -1205,7 +1231,7 @@ public final class SpeakerAudio {
         if (info == null) {
             return null;
         }
-        Located located = locate(info.tracks(), info.mode(), info.elapsedTicks());
+        Located located = locate(info.tracks(), info.mode(), info.elapsedTicks(), info.durations());
         return located == null ? null
                 : new float[]{(float) located.offsetSeconds(), (float) located.durationSeconds()};
     }
@@ -1224,7 +1250,8 @@ public final class SpeakerAudio {
             return;
         }
         BROADCASTS.put(payload.channel(), new BroadcastInfo(PlayMode.byOrdinal(payload.mode()),
-                parseTracks(payload.tracks()), payload.elapsedTicks(), clock, payload.revision(), clock));
+                parseTracks(payload.tracks()), payload.durations(), payload.elapsedTicks(), clock,
+                payload.revision(), clock));
     }
 
     /** 服务端推送：某个讲解石本地播放会话开始/停止 喵 */
@@ -1240,14 +1267,15 @@ public final class SpeakerAudio {
             return;
         }
         SESSIONS.put(payload.pos().immutable(), new SyncSession(parseTracks(payload.tracks()),
-                PlayMode.byOrdinal(payload.mode()), payload.elapsedTicks(), clock, payload.revision()));
+                payload.durations(), PlayMode.byOrdinal(payload.mode()), payload.elapsedTicks(),
+                clock, payload.revision()));
     }
 
     private static List<Track> parseTracks(String encoded) {
         List<Track> tracks = new ArrayList<>();
         for (String part : encoded.split("\u0002")) {
             int sep = part.indexOf('\u0001');
-            if (sep > 0) {
+            if (sep >= 0) {
                 tracks.add(new Track(part.substring(0, sep), part.substring(sep + 1)));
             }
         }

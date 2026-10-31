@@ -54,16 +54,18 @@ public final class PlaybackRegistry {
         final int selected;
         final PlayMode mode;
         final List<Track> order;
+        final int[] durations;
         final long startGameTime;
         final long revision;
         int range;
 
         private Session(List<Track> sourceTracks, int selected, PlayMode mode, List<Track> order,
-                        long startGameTime, long revision) {
+                        int[] durations, long startGameTime, long revision) {
             this.sourceTracks = sourceTracks;
             this.selected = selected;
             this.mode = mode;
             this.order = order;
+            this.durations = durations;
             this.startGameTime = startGameTime;
             this.revision = revision;
         }
@@ -166,7 +168,8 @@ public final class PlaybackRegistry {
             stop(level, pos);
             return;
         }
-        Session session = new Session(tracks, selected, mode, order, level.getGameTime(), ++REVISION);
+        Session session = new Session(tracks, selected, mode, order,
+                SpeakerNetworking.trackDurations(level, order), level.getGameTime(), ++REVISION);
         session.range = Math.max(64, (int) Math.ceil(be.getEffectiveAudibleRange()) + 16);
         map.put(pos.immutable(), session);
         LOGGER.info("playback session start pos={} mode={} order={} rev={}",
@@ -192,7 +195,7 @@ public final class PlaybackRegistry {
         for (ServerPlayer player : level.players()) {
             if (player.blockPosition().distSqr(pos) <= (double) removed.range * removed.range) {
                 SpeakerNetworking.sendToPlayer(player, new SpeakerPayloads.Playback(pos,
-                        removed.mode.ordinal(), false, "", elapsed, removed.revision));
+                        removed.mode.ordinal(), false, "", new int[0], elapsed, removed.revision));
             }
         }
     }
@@ -212,6 +215,7 @@ public final class PlaybackRegistry {
 
     private static void send(ServerPlayer player, BlockPos pos, Session session, ServerLevel level) {
         SpeakerNetworking.sendToPlayer(player, new SpeakerPayloads.Playback(pos,
-                session.mode.ordinal(), true, encode(session.order), session.elapsedTicks(level), session.revision));
+                session.mode.ordinal(), true, encode(session.order), session.durations,
+                session.elapsedTicks(level), session.revision));
     }
 }

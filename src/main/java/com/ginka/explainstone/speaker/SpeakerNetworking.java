@@ -34,9 +34,11 @@ import net.minecraftforge.network.simple.SimpleChannel;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.RandomAccessFile;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.function.Supplier;
@@ -46,16 +48,14 @@ import java.util.function.Supplier;
  * 音频库位置：&lt;存档&gt;/explainstone/audio/&lt;sha1&gt;.ogg 喵
  */
 public final class SpeakerNetworking {
-    /** 网络协议版本（新增 Playback 消息，旧客户端会被安全拒绝） 喵 */
-    private static final String PROTOCOL_VERSION = "2";
-    /** 单个文件上限（6 MB），避免误传大文件把存档撑爆 喵 */
-    private static final int MAX_FILE_BYTES = 6 * 1024 * 1024;
-    /** 单曲时长上限（秒） 喵 */
-    private static final int MAX_SECONDS = 5 * 60;
+    /** 网络协议版本（含时长元数据，旧客户端会被安全拒绝） 喵 */
+    private static final String PROTOCOL_VERSION = "3";
     /** 界面操作的最大有效距离（格） 喵 */
     private static final double MAX_INTERACT_DISTANCE_SQ = 64 * 64;
 
     private static final Map<String, ByteArrayOutputStream> UPLOADS = new HashMap<>();
+    /** 服务端时长缓存：sha1 → 秒；避免每次建会话都重新解析文件 喵 */
+    private static final Map<String, Integer> DURATION_CACHE = new HashMap<>();
 
     public static SimpleChannel CHANNEL;
 
@@ -243,9 +243,10 @@ public final class SpeakerNetworking {
         String key = player.getUUID() + "/" + payload.sha1();
         ByteArrayOutputStream buffer = UPLOADS.computeIfAbsent(key, k -> new ByteArrayOutputStream());
         buffer.writeBytes(payload.data());
-        if (buffer.size() > MAX_FILE_BYTES) {
+        if (buffer.size() > ExplainstoneConfig.maxAudioFileBytes()) {
             UPLOADS.remove(key);
-            player.displayClientMessage(Component.translatable("message.explainstone.import.too_large"), false);
+            player.displayClientMessage(Component.translatable("message.explainstone.import.too_large",
+                    ExplainstoneConfig.maxAudioFileMb()), false);
             return;
         }
         if (payload.index() + 1 < payload.total()) {
@@ -259,10 +260,21 @@ public final class SpeakerNetworking {
             return;
         }
         int seconds = oggSeconds(bytes);
-        if (seconds > MAX_SECONDS) {
-            player.displayClientMessage(Component.translatable("message.explainstone.import.too_long"), false);
+        if (seconds > ExplainstoneConfig.maxAudioDurationSeconds()) {
+            player.displayClientMessage(Component.translatable("message.explainstone.import.too_long",
+                    ExplainstoneConfig.maxAudioDurationSeconds()), false);
             return;
         }
+
+        SpeakerBlockEntity target = level.getBlockEntity(payload.pos()) instanceof SpeakerBlockEntity be ? be : null;
+        Track track = Track.file(payload.label(), payload.sha1());
+        if (target != null && !target.getTracks().contains(track)
+                && target.getTracks().size() >= ExplainstoneConfig.maxPlaylistTracks()) {
+            player.displayClientMessage(Component.translatable("message.explainstone.import.playlist_full",
+                    ExplainstoneConfig.maxPlaylistTracks()), false);
+            return;
+        }
+
         try {
             Path dir = audioDir(level.getServer());
             Files.createDirectories(dir);
@@ -271,11 +283,15 @@ public final class SpeakerNetworking {
             player.displayClientMessage(Component.translatable("message.explainstone.import.failed"), false);
             return;
         }
+        if (seconds > 0) {
+            DURATION_CACHE.put(payload.sha1(), seconds);
+        }
 
-        if (level.getBlockEntity(payload.pos()) instanceof SpeakerBlockEntity be) {
-            Track track = Track.file(payload.label(), payload.sha1());
-            if (!be.getTracks().contains(track)) {
-                be.addTrack(track);
+        if (target != null) {
+            if (!target.getTracks().contains(track) && target.addTrack(track) < 0) {
+                player.displayClientMessage(Component.translatable("message.explainstone.import.playlist_full",
+                        ExplainstoneConfig.maxPlaylistTracks()), false);
+                return;
             }
         }
         player.displayClientMessage(Component.translatable("message.explainstone.import.ok", payload.label()), true);
@@ -283,21 +299,33 @@ public final class SpeakerNetworking {
 
     /** 直接解析 ogg 头算时长（采样率 + 末尾页 granule） 喵 */
     private static int oggSeconds(byte[] data) {
-        int rate = -1;
-        for (int i = 0; i + 4 <= data.length; i++) {
-            if (data[i] == 'O' && data[i + 1] == 'g' && data[i + 2] == 'g' && data[i + 3] == 'S') {
-                int segments = data[i + 26] & 0xFF;
-                int pkt = i + 27 + segments;
-                if (pkt + 16 <= data.length && data[pkt] == 1) {
-                    rate = (data[pkt + 12] & 0xFF) | ((data[pkt + 13] & 0xFF) << 8)
-                            | ((data[pkt + 14] & 0xFF) << 16) | ((data[pkt + 15] & 0xFF) << 24);
-                }
-                break;
-            }
-        }
+        int rate = sampleRate(data);
         if (rate <= 0) {
             return -1;
         }
+        long granule = lastGranule(data);
+        return granule > 0 ? (int) (granule / rate) : -1;
+    }
+
+    private static int sampleRate(byte[] data) {
+        for (int i = 0; i + 4 <= data.length; i++) {
+            if (data[i] == 'O' && data[i + 1] == 'g' && data[i + 2] == 'g' && data[i + 3] == 'S') {
+                if (i + 27 > data.length) {
+                    return -1;
+                }
+                int segments = data[i + 26] & 0xFF;
+                int pkt = i + 27 + segments;
+                if (pkt + 16 <= data.length && data[pkt] == 1) {
+                    return (data[pkt + 12] & 0xFF) | ((data[pkt + 13] & 0xFF) << 8)
+                            | ((data[pkt + 14] & 0xFF) << 16) | ((data[pkt + 15] & 0xFF) << 24);
+                }
+                return -1;
+            }
+        }
+        return -1;
+    }
+
+    private static long lastGranule(byte[] data) {
         for (int i = data.length - 4; i >= 0; i--) {
             if (data[i] == 'O' && data[i + 1] == 'g' && data[i + 2] == 'g' && data[i + 3] == 'S'
                     && i + 14 <= data.length) {
@@ -305,10 +333,83 @@ public final class SpeakerNetworking {
                 for (int b = 7; b >= 0; b--) {
                     granule = (granule << 8) | (data[i + 6 + b] & 0xFF);
                 }
-                return granule > 0 ? (int) (granule / rate) : -1;
+                return granule;
             }
         }
         return -1;
+    }
+
+    /**
+     * 从文件头/尾各读一小段来算时长，避免建立会话时把 500 首音频整首读一遍。 喵
+     */
+    private static int oggSeconds(Path path) {
+        try {
+            long size = Files.size(path);
+            if (size <= 0) {
+                return -1;
+            }
+            int headLength = (int) Math.min(size, 64 * 1024);
+            int rate = sampleRate(readRange(path, 0, headLength));
+            if (rate <= 0 && size > headLength) {
+                // 文件头前 64 KiB 不是 Vorbis 识别头时，退回整文件解析 喵
+                return oggSeconds(Files.readAllBytes(path));
+            }
+            if (rate <= 0) {
+                return -1;
+            }
+            int tailLength = (int) Math.min(size, 64 * 1024);
+            long tailStart = size - tailLength;
+            long granule = lastGranule(readRange(path, tailStart, tailLength));
+            if (granule <= 0 && size > tailLength) {
+                // 极少数文件的末尾页异常大，退回整文件解析 喵
+                granule = lastGranule(Files.readAllBytes(path));
+            }
+            return granule > 0 ? (int) (granule / rate) : -1;
+        } catch (IOException e) {
+            return -1;
+        }
+    }
+
+    private static byte[] readRange(Path path, long offset, int length) throws IOException {
+        byte[] data = new byte[length];
+        try (RandomAccessFile file = new RandomAccessFile(path.toFile(), "r")) {
+            file.seek(offset);
+            file.readFully(data);
+        }
+        return data;
+    }
+
+    /** 当前会话顺序对应的时长数组；0 表示暂时未知 喵 */
+    public static int[] trackDurations(ServerLevel level, List<Track> tracks) {
+        int[] durations = new int[tracks.size()];
+        for (int i = 0; i < tracks.size(); i++) {
+            durations[i] = trackDuration(level, tracks.get(i));
+        }
+        return durations;
+    }
+
+    public static int trackDuration(ServerLevel level, Track track) {
+        if (track == null || !track.isFile()) {
+            return 0;
+        }
+        String sha1 = track.sha1();
+        if (sha1.isEmpty()) {
+            return 0;
+        }
+        Integer cached = DURATION_CACHE.get(sha1);
+        if (cached != null) {
+            return cached;
+        }
+        Path file = audioDir(level.getServer()).resolve(sha1 + ".ogg");
+        if (!Files.isRegularFile(file)) {
+            return 0;
+        }
+        int seconds = oggSeconds(file);
+        if (seconds > 0) {
+            DURATION_CACHE.put(sha1, seconds);
+            return seconds;
+        }
+        return 0;
     }
 
     private static boolean isOgg(byte[] bytes) {

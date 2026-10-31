@@ -7,6 +7,9 @@ Port of the Fabric 1.21.1 edition of **Explainstone / Songmelyn / Broadcast Tran
 * Playlist modes (sequence / repeat one / shuffle), channel broadcasting and receive mode.
 * Imported audio is uploaded in chunks and stored inside the world save
   (`<world>/explainstone/audio/<sha1>.ogg`), then streamed to nearby clients on demand.
+  Only the current track and the next track in the playlist are fetched: entering a
+  speaker's range no longer downloads the whole playlist up front.
+* Import limits are configurable: 10 MB / 10 minutes / 500 tracks per playlist by default.
 * Client-side OpenAL playback engine, independent of resource packs.
 * Directional playback: decoded audio is mono-downmixed and positioned in the world,
   so the stereo image follows where the speaker actually is (turn around and left/right swap).
@@ -71,7 +74,17 @@ reverbMaxRoomDistance = 48.0
 reverbGain = 0.3
 reverbGainHF = 0.8
 reverbWet = 0.8
+# Imported ogg size limit in MiB (1-100).
+maxAudioFileMb = 10
+# Single-track duration limit in seconds (1-7200).
+maxAudioDurationSeconds = 600
+# Maximum number of tracks in one playlist (1-10000).
+maxPlaylistTracks = 500
 ```
+
+Keep the three import-limit values identical on the client and the server: the client
+checks file size before uploading, and the server enforces size, duration and playlist
+length when the upload is assembled.
 
 ## Differences from the Fabric edition
 

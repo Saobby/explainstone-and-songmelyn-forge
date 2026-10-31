@@ -12,6 +12,7 @@
  */
 package com.ginka.explainstone.client.audio;
 
+import com.ginka.explainstone.ExplainstoneConfig;
 import com.ginka.explainstone.speaker.SpeakerNetworking;
 import com.ginka.explainstone.speaker.SpeakerPayloads;
 import net.minecraft.client.Minecraft;
@@ -53,8 +54,9 @@ public final class SpeakerAudioCache {
         }
         try {
             long size = Files.size(path);
-            if (size <= 0 || size > 6L * 1024 * 1024) {
-                message(client, Component.translatable("message.explainstone.import.too_large"));
+            if (size <= 0 || size > ExplainstoneConfig.maxAudioFileBytes()) {
+                message(client, Component.translatable("message.explainstone.import.too_large",
+                        ExplainstoneConfig.maxAudioFileMb()));
                 return;
             }
             byte[] bytes = Files.readAllBytes(path);

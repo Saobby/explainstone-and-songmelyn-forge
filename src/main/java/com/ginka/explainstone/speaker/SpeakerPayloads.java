@@ -95,21 +95,46 @@ public final class SpeakerPayloads {
         }
     }
 
+    /** 时长数组：0 表示未知；和 tracks 顺序一一对应 喵 */
+    static void writeDurations(FriendlyByteBuf buf, int[] durations) {
+        if (durations == null) {
+            buf.writeVarInt(0);
+            return;
+        }
+        buf.writeVarInt(durations.length);
+        for (int duration : durations) {
+            buf.writeVarInt(Math.max(0, duration));
+        }
+    }
+
+    static int[] readDurations(FriendlyByteBuf buf) {
+        int length = buf.readVarInt();
+        if (length <= 0 || length > 10000) {
+            return new int[0];
+        }
+        int[] durations = new int[length];
+        for (int i = 0; i < length; i++) {
+            durations[i] = buf.readVarInt();
+        }
+        return durations;
+    }
+
     /** 服务端 → 客户端：某频道开始/停止广播（信号范围 512 格） 喵 */
-    public record Broadcast(int channel, int mode, boolean active, String tracks,
+    public record Broadcast(int channel, int mode, boolean active, String tracks, int[] durations,
                             long elapsedTicks, long revision) {
         public void encode(FriendlyByteBuf buf) {
             buf.writeVarInt(this.channel);
             buf.writeVarInt(this.mode);
             buf.writeBoolean(this.active);
             buf.writeUtf(this.tracks);
+            writeDurations(buf, this.durations);
             buf.writeLong(this.elapsedTicks);
             buf.writeLong(this.revision);
         }
 
         public static Broadcast decode(FriendlyByteBuf buf) {
             return new Broadcast(buf.readVarInt(), buf.readVarInt(), buf.readBoolean(),
-                    buf.readUtf(), buf.readLong(), buf.readLong());
+                    buf.readUtf(), readDurations(buf), buf.readLong(), buf.readLong());
         }
     }
 
@@ -117,20 +142,21 @@ public final class SpeakerPayloads {
      * 服务端 → 客户端：某个讲解石方块的本地播放会话。
      * elapsedTicks 是发包时已经播放的游戏 tick 数，客户端再加本地经过的 tick 即可对齐 喵
      */
-    public record Playback(BlockPos pos, int mode, boolean active, String tracks,
+    public record Playback(BlockPos pos, int mode, boolean active, String tracks, int[] durations,
                            long elapsedTicks, long revision) {
         public void encode(FriendlyByteBuf buf) {
             buf.writeBlockPos(this.pos);
             buf.writeVarInt(this.mode);
             buf.writeBoolean(this.active);
             buf.writeUtf(this.tracks);
+            writeDurations(buf, this.durations);
             buf.writeLong(this.elapsedTicks);
             buf.writeLong(this.revision);
         }
 
         public static Playback decode(FriendlyByteBuf buf) {
             return new Playback(buf.readBlockPos(), buf.readVarInt(), buf.readBoolean(),
-                    buf.readUtf(), buf.readLong(), buf.readLong());
+                    buf.readUtf(), readDurations(buf), buf.readLong(), buf.readLong());
         }
     }
 
