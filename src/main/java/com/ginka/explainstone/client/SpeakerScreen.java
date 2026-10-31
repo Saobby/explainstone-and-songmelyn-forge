@@ -518,10 +518,10 @@ public class SpeakerScreen extends Screen {
                 : SpeakerAudio.progress(this.pos);
         SpeakerUploader.Status upload = SpeakerUploader.status(this.pos);
         // 只有真的需要显示“正在播放/已暂停”或上传状态时才给那一行留位置；
-        // 否则列表直接铺到进度条上方，避免中间出现一块没用的空白 喵
+        // 没有进度和上传状态时，列表一直用到播放/停止按钮上方，别让进度条那块区域空着 喵
         int listBottomLimit = (progress != null || upload != null)
                 ? this.nowPlayingY - 2
-                : this.progressBarTop - 2;
+                : this.row1 - 2;
         this.listRows = Math.max(1, (listBottomLimit - this.listTop) / ROW_H);
 
         if (receive) {

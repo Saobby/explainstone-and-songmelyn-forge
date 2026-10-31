@@ -633,10 +633,19 @@ public final class SpeakerAudio {
                             continue;
                         } else if (world.getBlockEntity(pos) instanceof SpeakerBlockEntity be) {
                             boolean receive = be.isReceiveMode();
-                            if (!receive && !state.getValue(SpeakerBlock.PLAYING)) {
+                            // 方块实体的 paused 更新可能比暂停快照晚一帧到达，
+                            // 所以客户端已有的暂停会话也算“暂停中”，避免扫描时把会话删掉 喵
+                            SyncSession session = SESSIONS.get(pos);
+                            boolean paused = be.isPaused() || (session != null && session.paused());
+                            // 暂停时 PLAYING 是 false，但会话要保留给界面显示进度，不能从扫描结果里排除 喵
+                            if (!receive && !state.getValue(SpeakerBlock.PLAYING) && !paused) {
                                 continue;
                             }
-                            double range = be.getEffectiveAudibleRange();
+                            // 暂停会话的服务端发送范围至少 64 格（和界面交互距离一致），
+                            // 不能只按听得到的范围扫描，否则 40 格音量下站在 50 格处进度会消失 喵
+                            double range = paused
+                                    ? Math.max(64.0, be.getEffectiveAudibleRange())
+                                    : be.getEffectiveAudibleRange();
                             if (range > 0.0 && pos.distSqr(center) <= range * range) {
                                 outSpeakers.add(pos);
                             }
