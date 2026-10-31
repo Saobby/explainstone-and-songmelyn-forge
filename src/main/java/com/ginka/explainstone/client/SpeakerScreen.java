@@ -62,7 +62,6 @@ public class SpeakerScreen extends Screen {
     private int titleY;
     private int listTop;
     private int listRows;
-    private int hintY;
     private int nowPlayingY;
     private int progressBarTop;
     private int progressBarBottom;
@@ -178,8 +177,7 @@ public class SpeakerScreen extends Screen {
         this.row3 = this.row4 - gap;
         this.row2 = this.row3 - gap;
         this.row1 = this.row2 - gap;
-        // 给“当前播放 + 进度条 + 上传状态”留出独立区域，避免盖住曲目列表 喵
-        this.hintY = this.row1 - 46;
+        // “正在播放 / 上传状态 / 列表提示”共用进度条上方的一行，列表一直排到这一行之前 喵
         this.nowPlayingY = this.row1 - 30;
         this.progressBarTop = this.row1 - 16;
         this.progressBarBottom = this.row1 - 6;
@@ -187,8 +185,9 @@ public class SpeakerScreen extends Screen {
         // ---- 顶部固定 ---- 喵
         this.titleY = 8;
         int tabY = this.titleY + 14;
-        this.listTop = tabY + 20 + 6;
-        this.listRows = Math.max(1, (this.hintY - this.listTop - 2) / ROW_H);
+        // 发信器没有顶部标签页，列表直接从标题下面开始；讲解石/颂美铃要跳过标签页那一行 喵
+        this.listTop = transmitter ? tabY : tabY + 18 + 2;
+        this.listRows = Math.max(1, (this.nowPlayingY - 2 - this.listTop) / ROW_H);
 
         // 模式标签页 喵
         this.tabSelf = this.addRenderableWidget(Button.builder(Component.translatable("screen.explainstone.tab.self"), b -> {
@@ -205,6 +204,9 @@ public class SpeakerScreen extends Screen {
             }
             this.refreshLabels();
         }).bounds(this.left + half + 4, tabY, half, 18).build());
+        // 发信器没有这两个标签页：初始化时就隐藏，别让它们先闪一帧盖住列表 喵
+        this.tabSelf.visible = !transmitter;
+        this.tabReceive.visible = !transmitter;
 
         // 播放 / 暂停（同一个按钮切换）+ 停止 喵
         this.playButton = this.addRenderableWidget(Button.builder(Component.translatable("screen.explainstone.button.play"),
@@ -511,6 +513,17 @@ public class SpeakerScreen extends Screen {
         }
         context.drawCenteredString(this.font, title, this.width / 2, this.titleY, 0xFFFFFF);
 
+        float[] progress = useBroadcast
+                ? SpeakerAudio.broadcastProgress(be == null ? 0 : be.getChannel())
+                : SpeakerAudio.progress(this.pos);
+        SpeakerUploader.Status upload = SpeakerUploader.status(this.pos);
+        // 只有真的需要显示“正在播放/已暂停”或上传状态时才给那一行留位置；
+        // 否则列表直接铺到进度条上方，避免中间出现一块没用的空白 喵
+        int listBottomLimit = (progress != null || upload != null)
+                ? this.nowPlayingY - 2
+                : this.progressBarTop - 2;
+        this.listRows = Math.max(1, (listBottomLimit - this.listTop) / ROW_H);
+
         if (receive) {
             context.drawCenteredString(this.font,
                     Component.translatable("screen.explainstone.receive.title"),
@@ -551,44 +564,43 @@ public class SpeakerScreen extends Screen {
             }
         }
 
-        float[] progress = useBroadcast
-                ? SpeakerAudio.broadcastProgress(be == null ? 0 : be.getChannel())
-                : SpeakerAudio.progress(this.pos);
-        SpeakerUploader.Status upload = SpeakerUploader.status(this.pos);
+        String uploadStatus = null;
         if (upload != null) {
-            String status;
             if (upload.phase() == SpeakerUploader.Phase.CHECKING) {
-                status = Component.translatable("screen.explainstone.upload.checking").getString();
+                uploadStatus = Component.translatable("screen.explainstone.upload.checking").getString();
             } else {
                 String key = upload.phase() == SpeakerUploader.Phase.UPLOADING
                         ? "screen.explainstone.upload.uploading"
                         : "screen.explainstone.upload.processing";
-                status = Component.translatable(key, upload.percent()).getString();
+                uploadStatus = Component.translatable(key, upload.percent()).getString();
             }
-            context.drawString(this.font, ellipsize(status, this.panelW),
-                    this.left, this.hintY, 0xFFD37A, true);
-        } else if (!receive && this.hintY >= this.listTop + ROW_H) {
-            // 收信模式下列表显示的是频道广播，不能再提示"点击选择曲目" 喵
-            context.drawString(this.font,
-                    Component.translatable("screen.explainstone.list.hint", tracks.size()),
-                    this.left, this.hintY, 0x909090, true);
         }
 
-        if (progress != null) {
+        String time = progress == null ? null
+                : timeOrZero((int) progress[0]) + " / " + timeOrZero((int) progress[1]);
+        int timeWidth = time == null ? 0 : this.font.width(time);
+        // 上传状态、“正在播放/已暂停”、列表提示共用一行，列表可以向下多排几行 喵
+        if (uploadStatus != null) {
+            int available = this.panelW - 8 - (time == null ? 0 : timeWidth + 6);
+            context.drawString(this.font, ellipsize(uploadStatus, available),
+                    this.left + 4, this.nowPlayingY, 0xFFD37A, true);
+        } else if (progress != null) {
             String label = useBroadcast
                     ? SpeakerAudio.broadcastTrackLabel(be == null ? 0 : be.getChannel())
                     : SpeakerAudio.currentTrackLabel(this.pos);
-            String time = timeOrZero((int) progress[0]) + " / " + timeOrZero((int) progress[1]);
             if (label != null) {
                 String nowPlaying = Component.translatable(paused
                         ? "screen.explainstone.now_playing_paused"
                         : "screen.explainstone.now_playing", label).getString();
-                int available = this.panelW - 8 - this.font.width(time);
+                int available = this.panelW - 8 - timeWidth;
                 context.drawString(this.font, ellipsize(nowPlaying, available),
                         this.left + 4, this.nowPlayingY, 0xFFFFFF, true);
             }
+        }
+
+        if (progress != null) {
             context.drawString(this.font, time,
-                    this.left + this.panelW - 4 - this.font.width(time), this.nowPlayingY, 0xB0C8FF, true);
+                    this.left + this.panelW - 4 - timeWidth, this.nowPlayingY, 0xB0C8FF, true);
             context.fill(this.left, this.progressBarTop, this.left + this.panelW,
                     this.progressBarBottom, 0x60FFFFFF);
             int filled = Math.round(this.panelW * Math.max(0f, Math.min(1f, progress[0] / progress[1])));
