@@ -53,6 +53,7 @@
   "message.explainstone.import.playlist_full": "Playlist is full (max %s tracks).",
   "message.explainstone.import.sha_mismatch": "Upload rejected: SHA-1 checksum mismatch.",
   "message.explainstone.import.failed": "Failed to store audio.",
+  "message.explainstone.import.busy": "Too many uploads are in progress; try again in a moment.",
   "message.explainstone.import.read_failed": "Failed to read file: %s",
   "message.explainstone.import.check_timeout": "The server did not answer the audio check; upload cancelled.",
   "message.explainstone.import.queued": "Queued %s ogg file(s) for import",

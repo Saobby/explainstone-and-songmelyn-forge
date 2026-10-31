@@ -16,6 +16,7 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.ListTag;
+import net.minecraft.nbt.NbtAccounter;
 import net.minecraft.nbt.NbtIo;
 import net.minecraft.nbt.Tag;
 import net.minecraft.resources.ResourceKey;
@@ -27,7 +28,9 @@ import net.minecraft.world.level.storage.LevelResource;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.DataInputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
@@ -37,6 +40,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.zip.GZIPInputStream;
 
 /**
  * 服务端音频引用表：键是音频 SHA-1，值是正在使用这份音频的音响/发信器（维度 + 坐标）。
@@ -76,12 +80,22 @@ public final class AudioUsageRegistry {
             return;
         }
         try {
-            CompoundTag root = NbtIo.readCompressed(storagePath.toFile());
+            CompoundTag root;
+            // 限制 NBT 读取配额：损坏或恶意构造的压缩引用表不会把服务端内存撑爆 喵
+            try (InputStream input = Files.newInputStream(storagePath);
+                 DataInputStream data = new DataInputStream(new GZIPInputStream(input))) {
+                root = NbtIo.read(data, new NbtAccounter(8L * 1024 * 1024));
+            }
+            if (root == null) {
+                return;
+            }
             CompoundTag usage = root.getCompound("usage");
             for (String sha1 : usage.getAllKeys()) {
                 if (!SpeakerNetworking.isValidSha1(sha1)) {
                     continue;
                 }
+                // 不限制单个音频的使用者条数：真正限制内存的是上面 8 MB 的 NBT 读取配额，
+                // 而运行时 update() 本来就能记录任意多个音响/发信器 喵
                 ListTag list = usage.getList(sha1, Tag.TAG_COMPOUND);
                 Map<Owner, Integer> owners = new HashMap<>();
                 for (int i = 0; i < list.size(); i++) {

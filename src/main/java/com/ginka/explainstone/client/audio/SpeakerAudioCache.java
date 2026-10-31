@@ -20,12 +20,23 @@ import java.util.Map;
 
 /** 客户端音频缓存：接收服务端下发的 ogg 并在下载完成后写入本地缓存 喵 */
 public final class SpeakerAudioCache {
+    /** 单个音频最多允许多少块（约 128 MiB），防止恶意服务端让客户端分配超大数组 喵 */
+    private static final int MAX_CHUNKS = 16_384;
+    /** 同时缓存中的下载数上限 喵 */
+    private static final int MAX_PENDING = 64;
     private static final Map<String, Pending> PENDING = new HashMap<>();
 
     private SpeakerAudioCache() {
     }
 
     public static void onChunk(SpeakerPayloads.AudioChunk payload) {
+        if (payload.total() <= 0 || payload.total() > MAX_CHUNKS
+                || payload.index() < 0 || payload.index() >= payload.total()) {
+            return;
+        }
+        if (!PENDING.containsKey(payload.sha1()) && PENDING.size() >= MAX_PENDING) {
+            return;
+        }
         Pending pending = PENDING.computeIfAbsent(payload.sha1(), k -> new Pending(payload.total()));
         pending.put(payload.index(), payload.data());
         if (pending.isComplete()) {

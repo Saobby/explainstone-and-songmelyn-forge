@@ -20,7 +20,8 @@ public final class ExplainstoneConfig {
 
     /** 广播是否只允许 OP（默认 false，谁都能广播） 喵 */
     public static final ForgeConfigSpec.BooleanValue BROADCAST_REQUIRES_OP = BUILDER
-            .comment("Whether only operators (permission level 2) may start a broadcast.")
+            .comment("Whether only operators (permission level 2) may start a broadcast.",
+                    "When true, redstone power cannot start a broadcast either (it can still stop one).")
             .define("broadcastRequiresOp", false);
 
     /**
@@ -97,6 +98,49 @@ public final class ExplainstoneConfig {
                     "Keep this value identical on the client and the server.")
             .defineInRange("maxPlaylistTracks", 500, 1, 10000);
 
+    // ------------------------------------------------------------ 服务器限速 / 抗滥用 喵
+    /** 每个玩家同时进行的导入上传数 喵 */
+    public static final ForgeConfigSpec.IntValue MAX_UPLOADS_PER_PLAYER = BUILDER
+            .comment("Server-side anti-abuse: maximum simultaneous chunked imports per player.",
+                    "A normal client uploads one file at a time; 4 leaves room for retries.")
+            .defineInRange("maxUploadsPerPlayer", 4, 1, 64);
+    /** 全服同时进行的导入上传数 喵 */
+    public static final ForgeConfigSpec.IntValue MAX_UPLOADS_TOTAL = BUILDER
+            .comment("Maximum simultaneous chunked imports on the whole server.",
+                    "Set this to at least maxUploadsPerPlayer × expected player count.")
+            .defineInRange("maxUploadsTotal", 128, 1, 4096);
+    /** 全服半截上传占用的总内存 喵 */
+    public static final ForgeConfigSpec.IntValue MAX_UPLOAD_BUFFER_MB = BUILDER
+            .comment("Total memory budget in MiB for incomplete uploads.",
+                    "When exceeded, the current upload is dropped and the client is told to retry later.")
+            .defineInRange("maxUploadBufferMb", 256, 8, 4096);
+
+    /** 界面操作令牌桶：突发容量 + 每秒回填 喵 */
+    public static final ForgeConfigSpec.IntValue ACTION_BURST = BUILDER
+            .comment("Server-side anti-abuse: burst capacity of interface actions per player.")
+            .defineInRange("actionBurst", 30, 1, 1000);
+    public static final ForgeConfigSpec.IntValue ACTION_REFILL_PER_SECOND = BUILDER
+            .comment("Interface actions allowed per second per player (after the burst is used).")
+            .defineInRange("actionRefillPerSecond", 15, 1, 500);
+
+    /** 音频下载请求令牌桶：突发容量 + 每秒回填 喵 */
+    public static final ForgeConfigSpec.IntValue AUDIO_REQUEST_BURST = BUILDER
+            .comment("Server-side anti-abuse: burst capacity of audio download requests per player.",
+                    "A joining client may request the current + next track for several speakers.")
+            .defineInRange("audioRequestBurst", 24, 1, 1000);
+    public static final ForgeConfigSpec.IntValue AUDIO_REQUEST_REFILL_PER_SECOND = BUILDER
+            .comment("Audio download requests allowed per second per player.")
+            .defineInRange("audioRequestRefillPerSecond", 6, 1, 500);
+
+    /** 音频下载流量令牌桶：突发 MB + 每秒回填 MB 喵 */
+    public static final ForgeConfigSpec.IntValue AUDIO_DOWNLOAD_BURST_MB = BUILDER
+            .comment("Server-side anti-abuse: burst budget in MiB for audio downloads per player.",
+                    "Each request consumes the file size; normal listening stays far below this.")
+            .defineInRange("audioDownloadBurstMb", 128, 1, 4096);
+    public static final ForgeConfigSpec.IntValue AUDIO_DOWNLOAD_MB_PER_SECOND = BUILDER
+            .comment("Audio download budget refilled per second per player, in MiB/s.")
+            .defineInRange("audioDownloadMbPerSecond", 8, 1, 1024);
+
     public static final ForgeConfigSpec SPEC = BUILDER.build();
 
     private ExplainstoneConfig() {
@@ -165,5 +209,50 @@ public final class ExplainstoneConfig {
     /** 播放列表最大曲目数 喵 */
     public static int maxPlaylistTracks() {
         return MAX_PLAYLIST_TRACKS.get();
+    }
+
+    /** 每玩家同时进行的上传数 喵 */
+    public static int maxUploadsPerPlayer() {
+        return MAX_UPLOADS_PER_PLAYER.get();
+    }
+
+    /** 全服同时进行的上传数 喵 */
+    public static int maxUploadsTotal() {
+        return MAX_UPLOADS_TOTAL.get();
+    }
+
+    /** 全服半截上传内存预算（字节） 喵 */
+    public static long maxUploadBufferBytes() {
+        return (long) MAX_UPLOAD_BUFFER_MB.get() * 1024L * 1024L;
+    }
+
+    /** 界面操作突发容量 喵 */
+    public static double actionBurst() {
+        return ACTION_BURST.get();
+    }
+
+    /** 界面操作每秒回填 喵 */
+    public static double actionRefillPerSecond() {
+        return ACTION_REFILL_PER_SECOND.get();
+    }
+
+    /** 音频下载请求突发容量 喵 */
+    public static double audioRequestBurst() {
+        return AUDIO_REQUEST_BURST.get();
+    }
+
+    /** 音频下载请求每秒回填 喵 */
+    public static double audioRequestRefillPerSecond() {
+        return AUDIO_REQUEST_REFILL_PER_SECOND.get();
+    }
+
+    /** 音频下载流量突发预算（MB） 喵 */
+    public static double audioDownloadBurstMb() {
+        return AUDIO_DOWNLOAD_BURST_MB.get();
+    }
+
+    /** 音频下载流量每秒回填（MB/s） 喵 */
+    public static double audioDownloadMbPerSecond() {
+        return AUDIO_DOWNLOAD_MB_PER_SECOND.get();
     }
 }

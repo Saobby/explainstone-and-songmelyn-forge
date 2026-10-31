@@ -57,6 +57,8 @@ public final class PlaybackRegistry {
         final int[] durations;
         final long startGameTime;
         final long revision;
+        /** 已经切好的曲目分片；列表过大时为 null（不下发） 喵 */
+        final List<String> trackParts;
         int range;
 
         private Session(List<Track> sourceTracks, int selected, PlayMode mode, List<Track> order,
@@ -68,6 +70,20 @@ public final class PlaybackRegistry {
             this.durations = durations;
             this.startGameTime = startGameTime;
             this.revision = revision;
+            String encoded = encode(order);
+            List<String> parts = null;
+            if (encoded.length() > SpeakerPayloads.MAX_PLAYLIST_CHARS) {
+                LOGGER.warn("播放列表编码后 {} 字符，超过上限 {}，本次不向客户端下发", encoded.length(),
+                        SpeakerPayloads.MAX_PLAYLIST_CHARS);
+            } else {
+                parts = SpeakerPayloads.splitTracks(encoded);
+                if (parts.size() > SpeakerPayloads.MAX_PARTS) {
+                    LOGGER.warn("播放列表需要 {} 个分片，超过上限 {}，本次不向客户端下发", parts.size(),
+                            SpeakerPayloads.MAX_PARTS);
+                    parts = null;
+                }
+            }
+            this.trackParts = parts;
         }
 
         private boolean matches(List<Track> tracks, PlayMode mode, int selected) {
@@ -112,9 +128,32 @@ public final class PlaybackRegistry {
             if (i > 0) {
                 sb.append('\u0002');
             }
-            sb.append(tracks.get(i).label()).append('\u0001').append(tracks.get(i).id());
+            Track track = tracks.get(i);
+            sb.append(track.label() == null ? "" : track.label()).append('\u0001')
+                    .append(track.id() == null ? "" : track.id());
         }
         return sb.toString();
+    }
+
+    /** 一条曲目在编码字符串里占的字符数（含分隔符，用于提前限制列表大小） 喵 */
+    public static long encodedLength(Track track) {
+        if (track == null) {
+            return 0L;
+        }
+        int label = track.label() == null ? 0 : track.label().length();
+        int id = track.id() == null ? 0 : track.id().length();
+        return (long) label + 1L + id + 1L;
+    }
+
+    /** 整个播放列表编码后的字符数 喵 */
+    public static long encodedLength(List<Track> tracks) {
+        long length = 0L;
+        if (tracks != null) {
+            for (Track track : tracks) {
+                length += encodedLength(track);
+            }
+        }
+        return length;
     }
 
     /** 玩家进服 / 客户端请求 Resync 时，把附近的会话补发过去 喵 */
@@ -172,6 +211,9 @@ public final class PlaybackRegistry {
                 SpeakerNetworking.trackDurations(level, order), level.getGameTime(), ++REVISION);
         session.range = Math.max(64, (int) Math.ceil(be.getEffectiveAudibleRange()) + 16);
         map.put(pos.immutable(), session);
+        if (session.trackParts == null) {
+            LOGGER.warn("playback session pos={} 的播放列表太大，暂不下发（减少曲目后会恢复）", pos.toShortString());
+        }
         LOGGER.info("playback session start pos={} mode={} order={} rev={}",
                 pos.toShortString(), mode, order.size(), session.revision);
         for (ServerPlayer player : level.players()) {
@@ -195,7 +237,7 @@ public final class PlaybackRegistry {
         for (ServerPlayer player : level.players()) {
             if (player.blockPosition().distSqr(pos) <= (double) removed.range * removed.range) {
                 SpeakerNetworking.sendToPlayer(player, new SpeakerPayloads.Playback(pos,
-                        removed.mode.ordinal(), false, "", new int[0], elapsed, removed.revision));
+                        removed.mode.ordinal(), false, "", new int[0], elapsed, removed.revision, 0, 1));
             }
         }
     }
@@ -214,8 +256,17 @@ public final class PlaybackRegistry {
     }
 
     private static void send(ServerPlayer player, BlockPos pos, Session session, ServerLevel level) {
-        SpeakerNetworking.sendToPlayer(player, new SpeakerPayloads.Playback(pos,
-                session.mode.ordinal(), true, encode(session.order), session.durations,
-                session.elapsedTicks(level), session.revision));
+        List<String> parts = session.trackParts;
+        if (parts == null || parts.isEmpty()) {
+            return;   // 播放列表过大：宁可不发，也不能在服务端编码时抛异常 喵
+        }
+        long elapsed = session.elapsedTicks(level);
+        for (int i = 0; i < parts.size(); i++) {
+            // durations 只在第 0 帧带，其他帧留空，避免大列表重复传几十 KB 喵
+            int[] durations = i == 0 ? session.durations : new int[0];
+            SpeakerNetworking.sendToPlayer(player, new SpeakerPayloads.Playback(pos,
+                    session.mode.ordinal(), true, parts.get(i), durations, elapsed,
+                    session.revision, i, parts.size()));
+        }
     }
 }

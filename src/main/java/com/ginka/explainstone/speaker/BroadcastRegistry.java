@@ -56,10 +56,14 @@ public final class BroadcastRegistry {
         final int[] durations;
         final long startGameTime;
         final long revision;
+        /** 已经切好的曲目分片；列表过大时为 null（不下发） 喵 */
+        final List<String> trackParts;
         int range;
+        /** 上次重发时间，用于限制恶意刷操作导致的广播重推放大 喵 */
+        long lastSentMs = System.currentTimeMillis();
 
         private Entry(int channel, List<Track> sourceTracks, int selected, PlayMode mode, List<Track> order,
-                      int[] durations, long startGameTime, long revision, int range) {
+                      int[] durations, long startGameTime, long revision, int range, List<String> trackParts) {
             this.channel = channel;
             this.sourceTracks = sourceTracks;
             this.selected = selected;
@@ -69,6 +73,7 @@ public final class BroadcastRegistry {
             this.startGameTime = startGameTime;
             this.revision = revision;
             this.range = range;
+            this.trackParts = trackParts;
         }
 
         private boolean matches(int channel, List<Track> tracks, PlayMode mode, int selected) {
@@ -105,8 +110,13 @@ public final class BroadcastRegistry {
         int selected = be.getSelected();
         PlayMode mode = be.getMode();
         if (existing != null && existing.matches(channel, tracks, mode, selected)) {
-            // 只是传播距离变了：保留原进度，重新下发一次 喵
+            // 只是传播距离变了：保留原进度，重新下发一次（但最多 1 秒一次，防止刷操作放大） 喵
             existing.range = range;
+            long now = System.currentTimeMillis();
+            if (now - existing.lastSentMs < 1000L) {
+                return;
+            }
+            existing.lastSentMs = now;
             sendEntry(level, pos, existing);
             return;
         }
@@ -120,8 +130,25 @@ public final class BroadcastRegistry {
             map.remove(pos);
             return;
         }
+        String encoded = PlaybackRegistry.encode(order);
+        List<String> parts = null;
+        if (encoded.length() > SpeakerPayloads.MAX_PLAYLIST_CHARS) {
+            LOGGER.warn("广播列表编码后 {} 字符，超过上限 {}，pos={} 暂不下发", encoded.length(),
+                    SpeakerPayloads.MAX_PLAYLIST_CHARS, pos.toShortString());
+        } else {
+            parts = SpeakerPayloads.splitTracks(encoded);
+            if (parts.size() > SpeakerPayloads.MAX_PARTS) {
+                LOGGER.warn("广播列表需要 {} 个分片，超过上限 {}，pos={} 暂不下发", parts.size(),
+                        SpeakerPayloads.MAX_PARTS, pos.toShortString());
+                parts = null;
+            }
+        }
+        if (parts == null) {
+            map.remove(pos);
+            return;
+        }
         Entry entry = new Entry(channel, tracks, selected, mode, order,
-                SpeakerNetworking.trackDurations(level, order), level.getGameTime(), ++REVISION, range);
+                SpeakerNetworking.trackDurations(level, order), level.getGameTime(), ++REVISION, range, parts);
         map.put(pos.immutable(), entry);
         LOGGER.info("broadcast session start pos={} ch={} mode={} order={} rev={}",
                 pos.toShortString(), channel, mode, order.size(), entry.revision);
@@ -165,7 +192,8 @@ public final class BroadcastRegistry {
         for (Entry entry : map.values()) {
             for (ServerPlayer player : level.players()) {
                 SpeakerNetworking.sendToPlayer(player, new SpeakerPayloads.Broadcast(
-                        entry.channel, 0, false, "", new int[0], entry.elapsedTicks(level), entry.revision));
+                        entry.channel, 0, false, "", new int[0], entry.elapsedTicks(level),
+                        entry.revision, 0, 1));
             }
         }
         map.clear();
@@ -180,9 +208,17 @@ public final class BroadcastRegistry {
     }
 
     private static void send(Entry entry, ServerLevel level, ServerPlayer player) {
-        SpeakerNetworking.sendToPlayer(player, new SpeakerPayloads.Broadcast(entry.channel,
-                entry.mode.ordinal(), true, PlaybackRegistry.encode(entry.order), entry.durations,
-                entry.elapsedTicks(level), entry.revision));
+        List<String> parts = entry.trackParts;
+        if (parts == null || parts.isEmpty()) {
+            return;   // 列表过大：不下发，避免服务端编码异常 喵
+        }
+        long elapsed = entry.elapsedTicks(level);
+        for (int i = 0; i < parts.size(); i++) {
+            int[] durations = i == 0 ? entry.durations : new int[0];
+            SpeakerNetworking.sendToPlayer(player, new SpeakerPayloads.Broadcast(entry.channel,
+                    entry.mode.ordinal(), true, parts.get(i), durations, elapsed,
+                    entry.revision, i, parts.size()));
+        }
     }
 
     private static void stopEntry(ServerLevel level, BlockPos pos, Entry entry) {
@@ -190,7 +226,7 @@ public final class BroadcastRegistry {
         for (ServerPlayer player : level.players()) {
             if (player.blockPosition().distSqr(pos) <= (double) entry.range * entry.range) {
                 SpeakerNetworking.sendToPlayer(player, new SpeakerPayloads.Broadcast(
-                        entry.channel, 0, false, "", new int[0], elapsed, entry.revision));
+                        entry.channel, 0, false, "", new int[0], elapsed, entry.revision, 0, 1));
             }
         }
     }

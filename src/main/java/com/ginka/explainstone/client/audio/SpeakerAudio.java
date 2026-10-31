@@ -101,7 +101,77 @@ public final class SpeakerAudio {
     private record Located(Track track, int index, double offsetSeconds, double durationSeconds) {
     }
 
-    private static final Set<String> REQUESTED = new HashSet<>();
+    /** 已请求但还没收到的音频：sha1 → 上次请求时间（毫秒）；允许超时重发，避免丢包后永久没声音 喵 */
+    private static final Map<String, Long> REQUESTED = new HashMap<>();
+    /** 同一个音频的重发间隔 喵 */
+    private static final long REQUEST_RETRY_MS = 3_000L;
+
+    /** 多帧播放列表的重组缓存；按 revision 覆盖，超时丢弃 喵 */
+    private static final Map<BlockPos, PartialPlaylist> PARTIAL_SESSIONS = new HashMap<>();
+    private static final Map<Integer, PartialPlaylist> PARTIAL_BROADCASTS = new HashMap<>();
+    /** 分片重组超时（tick，10 秒） 喵 */
+    private static final int PARTIAL_TIMEOUT_TICKS = 200;
+    /** 防御恶意服务端：最多同时维护多少个会话/频道/重组缓存 喵 */
+    private static final int MAX_SESSIONS = 4096;
+    private static final int MAX_BROADCASTS = 1024;
+    private static final int MAX_PARTIAL_SESSIONS = 256;
+    private static final int MAX_PARTIAL_BROADCASTS = 1024;
+
+    /**
+     * 一个正在按帧重组的播放列表。
+     * 第 0 帧带 durations，每个分片都带 mode / elapsedTicks / revision。 喵
+     */
+    private static final class PartialPlaylist {
+        final long revision;
+        final int partCount;
+        final String[] parts;
+        final long firstPartClock;
+        int received;
+        long totalChars;
+        long lastUpdateClock;
+        int mode;
+        long elapsedTicks;
+        int[] durations = new int[0];
+
+        private PartialPlaylist(long revision, int partCount, long clock) {
+            this.revision = revision;
+            this.partCount = partCount;
+            this.parts = new String[partCount];
+            this.firstPartClock = clock;
+            this.lastUpdateClock = clock;
+        }
+
+        private boolean put(int index, String part, int[] durations, int mode, long elapsedTicks, long clock) {
+            if (index < 0 || index >= this.parts.length || this.parts[index] != null) {
+                return false;
+            }
+            String value = part == null ? "" : part;
+            this.parts[index] = value;
+            this.received++;
+            this.totalChars += value.length();
+            if (index == 0 && durations != null && durations.length > 0) {
+                this.durations = durations;
+            }
+            this.mode = mode;
+            this.elapsedTicks = elapsedTicks;
+            this.lastUpdateClock = clock;
+            return true;
+        }
+
+        private boolean complete() {
+            return this.received >= this.partCount;
+        }
+
+        private String joined() {
+            StringBuilder sb = new StringBuilder((int) Math.min(Integer.MAX_VALUE, this.totalChars));
+            for (String part : this.parts) {
+                if (part != null) {
+                    sb.append(part);
+                }
+            }
+            return sb.toString();
+        }
+    }
 
     /** 上一轮扫描到的方块（每 10 tick 刷新一次） 喵 */
     private static List<BlockPos> speakers = List.of();
@@ -171,6 +241,8 @@ public final class SpeakerAudio {
         transmitters = List.of();
         SESSIONS.clear();
         BROADCASTS.clear();
+        PARTIAL_SESSIONS.clear();
+        PARTIAL_BROADCASTS.clear();
         REQUESTED.clear();
         lastWorld = null;
         wasNeedingSync = false;
@@ -205,6 +277,8 @@ public final class SpeakerAudio {
         transmitters = List.of();
         SESSIONS.clear();
         BROADCASTS.clear();
+        PARTIAL_SESSIONS.clear();
+        PARTIAL_BROADCASTS.clear();
         REQUESTED.clear();
         lastWorld = null;
         wasNeedingSync = false;
@@ -323,6 +397,11 @@ public final class SpeakerAudio {
         // 3.6) 已经停止/被拆掉的方块，清掉本地会话；频道广播 10 秒没更新也清掉 喵
         SESSIONS.keySet().removeIf(pos -> world.isLoaded(pos) && !isPlaying(world, pos));
         BROADCASTS.entrySet().removeIf(e -> clock - e.getValue().lastSeenClock() > 200);
+        // 没凑齐的分片缓存 10 秒后丢弃，避免恶意服务端/切维度时一直占内存 喵
+        if (clock % 40 == 0) {
+            PARTIAL_SESSIONS.entrySet().removeIf(e -> clock - e.getValue().lastUpdateClock > PARTIAL_TIMEOUT_TICKS);
+            PARTIAL_BROADCASTS.entrySet().removeIf(e -> clock - e.getValue().lastUpdateClock > PARTIAL_TIMEOUT_TICKS);
+        }
 
         // 4) 停掉不该响的音源 喵
         Iterator<Map.Entry<BlockPos, Voice>> it = VOICES.entrySet().iterator();
@@ -1141,9 +1220,12 @@ public final class SpeakerAudio {
             return;
         }
         String sha1 = track.sha1();
-        if (!REQUESTED.add(sha1)) {
+        long now = System.currentTimeMillis();
+        Long last = REQUESTED.get(sha1);
+        if (last != null && now - last < REQUEST_RETRY_MS) {
             return;
         }
+        REQUESTED.put(sha1, now);
         if (Minecraft.getInstance().getConnection() != null) {
             SpeakerNetworking.CHANNEL.sendToServer(new SpeakerPayloads.RequestAudio(sha1));
         }
@@ -1253,44 +1335,121 @@ public final class SpeakerAudio {
         return located == null ? null : located.track().label();
     }
 
-    /** 服务端推送：某频道开始/停止广播（带播放顺序 + 已播放 tick） 喵 */
+    /** 服务端推送：某频道开始/停止广播（可能分多帧；带播放顺序 + 已播放 tick） 喵 */
     public static void onBroadcast(SpeakerPayloads.Broadcast payload) {
-        BroadcastInfo current = BROADCASTS.get(payload.channel());
+        int channel = payload.channel();
+        BroadcastInfo current = BROADCASTS.get(channel);
+        long currentRev = current == null ? Long.MIN_VALUE : current.revision();
+        PartialPlaylist partial = PARTIAL_BROADCASTS.get(channel);
         if (!payload.active()) {
-            if (current == null || payload.revision() >= current.revision()) {
-                BROADCASTS.remove(payload.channel());
-                LOGGER.info("broadcast ch={} stopped", payload.channel());
+            if (payload.revision() >= currentRev) {
+                BROADCASTS.remove(channel);
+                LOGGER.info("broadcast ch={} stopped", channel);
+            }
+            if (partial == null || payload.revision() >= partial.revision) {
+                PARTIAL_BROADCASTS.remove(channel);
             }
             return;
         }
-        if (current != null && payload.revision() < current.revision()) {
+        if (payload.revision() < currentRev) {
             return;
         }
-        BROADCASTS.put(payload.channel(), new BroadcastInfo(PlayMode.byOrdinal(payload.mode()),
-                parseTracks(payload.tracks()), payload.durations(), payload.elapsedTicks(), clock,
-                payload.revision(), clock));
+        int partCount = payload.partCount();
+        int partIndex = payload.partIndex();
+        if (partCount <= 0 || partCount > SpeakerPayloads.MAX_PARTS
+                || partIndex < 0 || partIndex >= partCount) {
+            return;
+        }
+        if (partial != null && payload.revision() < partial.revision) {
+            return;
+        }
+        if (partial == null || payload.revision() > partial.revision || partial.partCount != partCount) {
+            if (partial == null && PARTIAL_BROADCASTS.size() >= MAX_PARTIAL_BROADCASTS) {
+                return;
+            }
+            if (current == null && BROADCASTS.size() >= MAX_BROADCASTS) {
+                return;   // 防御恶意服务端塞无限频道 喵
+            }
+            partial = new PartialPlaylist(payload.revision(), partCount, clock);
+            PARTIAL_BROADCASTS.put(channel, partial);
+        }
+        if (!partial.put(partIndex, payload.tracks(), payload.durations(), payload.mode(),
+                payload.elapsedTicks(), clock)) {
+            return;
+        }
+        if (partial.totalChars > SpeakerPayloads.MAX_PLAYLIST_CHARS) {
+            PARTIAL_BROADCASTS.remove(channel);
+            return;
+        }
+        if (!partial.complete()) {
+            return;
+        }
+        PARTIAL_BROADCASTS.remove(channel);
+        BROADCASTS.put(channel, new BroadcastInfo(PlayMode.byOrdinal(partial.mode),
+                parseTracks(partial.joined()), partial.durations, partial.elapsedTicks,
+                partial.firstPartClock, partial.revision, clock));
     }
 
-    /** 服务端推送：某个讲解石本地播放会话开始/停止 喵 */
+    /** 服务端推送：某个讲解石本地播放会话开始/停止（可能分多帧） 喵 */
     public static void onPlayback(SpeakerPayloads.Playback payload) {
-        SyncSession current = SESSIONS.get(payload.pos());
+        BlockPos key = payload.pos().immutable();
+        SyncSession current = SESSIONS.get(key);
+        long currentRev = current == null ? Long.MIN_VALUE : current.revision();
+        PartialPlaylist partial = PARTIAL_SESSIONS.get(key);
         if (!payload.active()) {
-            if (current == null || payload.revision() >= current.revision()) {
-                SESSIONS.remove(payload.pos());
+            if (payload.revision() >= currentRev) {
+                SESSIONS.remove(key);
+            }
+            if (partial == null || payload.revision() >= partial.revision) {
+                PARTIAL_SESSIONS.remove(key);
             }
             return;
         }
-        if (current != null && payload.revision() < current.revision()) {
+        if (payload.revision() < currentRev) {
             return;
         }
-        SESSIONS.put(payload.pos().immutable(), new SyncSession(parseTracks(payload.tracks()),
-                payload.durations(), PlayMode.byOrdinal(payload.mode()), payload.elapsedTicks(),
-                clock, payload.revision()));
+        int partCount = payload.partCount();
+        int partIndex = payload.partIndex();
+        if (partCount <= 0 || partCount > SpeakerPayloads.MAX_PARTS
+                || partIndex < 0 || partIndex >= partCount) {
+            return;
+        }
+        if (partial != null && payload.revision() < partial.revision) {
+            return;
+        }
+        if (partial == null || payload.revision() > partial.revision || partial.partCount != partCount) {
+            if (partial == null && PARTIAL_SESSIONS.size() >= MAX_PARTIAL_SESSIONS) {
+                return;
+            }
+            if (current == null && SESSIONS.size() >= MAX_SESSIONS) {
+                return;   // 防御恶意服务端塞无限会话 喵
+            }
+            partial = new PartialPlaylist(payload.revision(), partCount, clock);
+            PARTIAL_SESSIONS.put(key, partial);
+        }
+        if (!partial.put(partIndex, payload.tracks(), payload.durations(), payload.mode(),
+                payload.elapsedTicks(), clock)) {
+            return;
+        }
+        if (partial.totalChars > SpeakerPayloads.MAX_PLAYLIST_CHARS) {
+            PARTIAL_SESSIONS.remove(key);
+            return;
+        }
+        if (!partial.complete()) {
+            return;
+        }
+        PARTIAL_SESSIONS.remove(key);
+        SESSIONS.put(key, new SyncSession(parseTracks(partial.joined()), partial.durations,
+                PlayMode.byOrdinal(partial.mode), partial.elapsedTicks,
+                partial.firstPartClock, partial.revision));
     }
 
     private static List<Track> parseTracks(String encoded) {
         List<Track> tracks = new ArrayList<>();
         for (String part : encoded.split("\u0002")) {
+            if (tracks.size() >= 10_000) {
+                break;   // 防御恶意服务端塞入过多曲目 喵
+            }
             int sep = part.indexOf('\u0001');
             if (sep >= 0) {
                 tracks.add(new Track(part.substring(0, sep), part.substring(sep + 1)));

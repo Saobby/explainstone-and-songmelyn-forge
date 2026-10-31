@@ -89,7 +89,9 @@ public class BroadcastTransmitterBlock extends Block implements EntityBlock {
             boolean powered = level.hasNeighborSignal(pos);
             boolean edge = powered != be.isLastPowered();
             be.setLastPowered(powered);
-            if (edge && be.isRespectRedstone() && state.getValue(PLAYING) != powered) {
+            if (edge && be.isRespectRedstone() && state.getValue(PLAYING) != powered
+                    // 配置要求 OP 才能开播时，红石不能被用来绕过权限（停止广播仍然允许） 喵
+                    && !(powered && ExplainstoneConfig.broadcastRequiresOp())) {
                 level.setBlock(pos, state.setValue(PLAYING, powered), Block.UPDATE_ALL);
                 if (powered) {
                     if (be.getTimerSeconds() > 0) {

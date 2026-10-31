@@ -34,6 +34,7 @@ import net.minecraftforge.network.simple.SimpleChannel;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.RandomAccessFile;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -44,6 +45,7 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.UUID;
 import java.util.function.Supplier;
 
 /**
@@ -51,8 +53,8 @@ import java.util.function.Supplier;
  * 音频库位置：&lt;存档&gt;/explainstone/audio/&lt;sha1&gt;.ogg 喵
  */
 public final class SpeakerNetworking {
-    /** 网络协议版本（含上传前 SHA-1 预检，旧客户端会被安全拒绝） 喵 */
-    private static final String PROTOCOL_VERSION = "4";
+    /** 网络协议版本（5：播放列表分帧 + 上传前 SHA-1 预检，旧客户端会被安全拒绝） 喵 */
+    private static final String PROTOCOL_VERSION = "5";
     /** 界面操作的最大有效距离（格） 喵 */
     private static final double MAX_INTERACT_DISTANCE_SQ = 64 * 64;
 
@@ -61,10 +63,87 @@ public final class SpeakerNetworking {
     private static final Map<String, Integer> DURATION_CACHE = new HashMap<>();
     /** 分块上传超过这个时间没有新块就丢弃，防止半截上传一直占内存 喵 */
     private static final long UPLOAD_TIMEOUT_MS = 120_000L;
+    /**
+     * 单个玩家同时进行的上传数上限（配置项 maxUploadsPerPlayer；正常客户端一次只传一首） 喵
+     * 全服上限 / 内存预算 / 各类令牌桶配额见 ExplainstoneConfig。
+     */
+    /** 按玩家记录的令牌桶；只在服务端线程访问 喵 */
+    private static final Map<UUID, RateBucket> ACTION_BUCKETS = new HashMap<>();
+    private static final Map<UUID, RateBucket> AUDIO_REQUEST_BUCKETS = new HashMap<>();
+    private static final Map<UUID, RateBucket> AUDIO_BYTE_BUCKETS = new HashMap<>();
 
     public static SimpleChannel CHANNEL;
 
     private SpeakerNetworking() {
+    }
+
+    /** 简单令牌桶：容量防突发、按秒回填防刷屏 喵 */
+    private static final class RateBucket {
+        private final double capacity;
+        private final double refillPerSecond;
+        private double tokens;
+        private long lastRefill = System.currentTimeMillis();
+
+        private RateBucket(double capacity, double refillPerSecond) {
+            this.capacity = capacity;
+            this.refillPerSecond = refillPerSecond;
+            this.tokens = capacity;
+        }
+
+        private boolean tryConsume(double cost) {
+            long now = System.currentTimeMillis();
+            long elapsed = now - this.lastRefill;
+            if (elapsed > 0L) {
+                this.tokens = Math.min(this.capacity, this.tokens + elapsed * this.refillPerSecond / 1000.0);
+                this.lastRefill = now;
+            }
+            if (this.tokens < cost) {
+                return false;
+            }
+            this.tokens -= cost;
+            return true;
+        }
+    }
+
+    private static boolean allowAction(ServerPlayer player) {
+        if (player == null) {
+            return false;
+        }
+        return bucket(ACTION_BUCKETS, player, ExplainstoneConfig.actionBurst(),
+                ExplainstoneConfig.actionRefillPerSecond()).tryConsume(1.0);
+    }
+
+    private static boolean allowAudioRequest(ServerPlayer player) {
+        if (player == null) {
+            return false;
+        }
+        return bucket(AUDIO_REQUEST_BUCKETS, player, ExplainstoneConfig.audioRequestBurst(),
+                ExplainstoneConfig.audioRequestRefillPerSecond()).tryConsume(1.0);
+    }
+
+    /** 按文件大小扣流量预算：防止一秒钟拉几十份大文件把磁盘/带宽打满 喵 */
+    private static boolean allowAudioBytes(ServerPlayer player, long bytes) {
+        if (player == null) {
+            return false;
+        }
+        double cost = Math.max(1.0, bytes / (1024.0 * 1024.0));
+        return bucket(AUDIO_BYTE_BUCKETS, player, ExplainstoneConfig.audioDownloadBurstMb(),
+                ExplainstoneConfig.audioDownloadMbPerSecond()).tryConsume(cost);
+    }
+
+    /**
+     * 取（或按当前配置重建）某个玩家的令牌桶。
+     * 这样 /reload 之后新配额会立刻生效，而不是等玩家重新登录。 喵
+     */
+    private static RateBucket bucket(Map<UUID, RateBucket> buckets, ServerPlayer player,
+                                     double capacity, double refillPerSecond) {
+        UUID id = player.getUUID();
+        RateBucket bucket = buckets.get(id);
+        if (bucket == null || bucket.capacity != capacity || bucket.refillPerSecond != refillPerSecond) {
+            bucket = new RateBucket(capacity, refillPerSecond);
+            buckets.put(id, bucket);
+        }
+        return bucket;
     }
 
     public static void register() {
@@ -130,18 +209,45 @@ public final class SpeakerNetworking {
         }
     }
 
-    /** 玩家退出时丢弃该玩家所有未完成的上传 喵 */
+    /** 玩家退出时丢弃该玩家所有未完成的上传与限速状态 喵 */
     public static void removePlayerUploads(ServerPlayer player) {
         if (player == null) {
             return;
         }
         String prefix = player.getUUID() + "/";
         UPLOADS.keySet().removeIf(key -> key.startsWith(prefix));
+        ACTION_BUCKETS.remove(player.getUUID());
+        AUDIO_REQUEST_BUCKETS.remove(player.getUUID());
+        AUDIO_BYTE_BUCKETS.remove(player.getUUID());
     }
 
-    /** 服务端停止时清空上传缓存 喵 */
+    /** 服务端停止时清空上传/限速/时长缓存 喵 */
     public static void clearUploads() {
         UPLOADS.clear();
+        DURATION_CACHE.clear();
+        ACTION_BUCKETS.clear();
+        AUDIO_REQUEST_BUCKETS.clear();
+        AUDIO_BYTE_BUCKETS.clear();
+    }
+
+    /** 某个玩家当前有多少个未完成上传（key 前缀 = UUID + "/"） 喵 */
+    private static int countUploads(String prefix) {
+        int count = 0;
+        for (String key : UPLOADS.keySet()) {
+            if (key.startsWith(prefix)) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    /** 全服所有未完成上传已经占用的字节数 喵 */
+    private static long totalUploadBytes() {
+        long total = 0L;
+        for (Upload upload : UPLOADS.values()) {
+            total += upload.size;
+        }
+        return total;
     }
 
     // ------------------------------------------------------------ 音频库路径 喵
@@ -194,9 +300,10 @@ public final class SpeakerNetworking {
     private static void handleResync(SpeakerPayloads.Resync payload, Supplier<NetworkEvent.Context> ctx) {
         NetworkEvent.Context context = ctx.get();
         context.enqueueWork(() -> {
-            if (context.getSender() != null) {
-                PlaybackRegistry.syncNear(context.getSender());
-                BroadcastRegistry.onJoin(context.getSender());
+            ServerPlayer player = context.getSender();
+            if (player != null && allowAction(player)) {
+                PlaybackRegistry.syncNear(player);
+                BroadcastRegistry.onJoin(player);
             }
         });
         context.setPacketHandled(true);
@@ -228,6 +335,10 @@ public final class SpeakerNetworking {
         if (player == null || !(player.level() instanceof ServerLevel level)) {
             return;
         }
+        // 界面操作限速：防止伪造包高频刷方块同步/广播重推 喵
+        if (!allowAction(player)) {
+            return;
+        }
         BlockPos pos = payload.pos();
         if (player.blockPosition().distSqr(pos) > MAX_INTERACT_DISTANCE_SQ) {
             return;
@@ -237,10 +348,8 @@ public final class SpeakerNetworking {
         }
 
         boolean isTransmitter = level.getBlockState(pos).getBlock() instanceof BroadcastTransmitterBlock;
-        boolean broadcasting = payload.action() == SpeakerPayloads.ACTION_PLAY
-                || payload.action() == SpeakerPayloads.ACTION_PLAY_INDEX;
-        if (isTransmitter && broadcasting && ExplainstoneConfig.broadcastRequiresOp()
-                && !player.hasPermissions(2)) {
+        if (isOpOnly(player, level, pos)) {
+            // 发信器在 OP 模式下整个归 OP 管：防止非 OP 停止/改频道劫持正在进行的广播 喵
             player.displayClientMessage(Component.translatable("message.explainstone.broadcast.no_permission"), false);
             return;
         }
@@ -283,11 +392,18 @@ public final class SpeakerNetworking {
         }
 
         // 状态变了 → 重新登记并同步给附近玩家（列表/模式没变时不会重置进度） 喵
-        if (level.getBlockState(pos).getBlock() instanceof BroadcastTransmitterBlock) {
+        if (isTransmitter) {
             BroadcastRegistry.refresh(level, pos, be);
         } else if (level.getBlockState(pos).getBlock() instanceof com.ginka.explainstone.SpeakerBlock) {
             PlaybackRegistry.ensure(level, pos, be);
         }
+    }
+
+    /** 配置为「只有 OP 能广播」时，发信器的界面操作/预检/上传都只允许 OP 使用 喵 */
+    private static boolean isOpOnly(ServerPlayer player, ServerLevel level, BlockPos pos) {
+        return ExplainstoneConfig.broadcastRequiresOp()
+                && level.getBlockState(pos).getBlock() instanceof BroadcastTransmitterBlock
+                && !player.hasPermissions(2);
     }
 
     private static void setPlaying(ServerLevel level, BlockPos pos, boolean playing) {
@@ -311,29 +427,46 @@ public final class SpeakerNetworking {
         if (player == null) {
             return;
         }
+        // 预检也限速；超速直接回 accepted=false，避免客户端干等 15 秒 喵
+        if (!allowAction(player)) {
+            sendToPlayer(player, new SpeakerPayloads.AudioQueryResult(
+                    payload.pos(), payload.queryId(), false, List.of()));
+            return;
+        }
+        if (player.level() instanceof ServerLevel level && isOpOnly(player, level, payload.pos())) {
+            player.displayClientMessage(Component.translatable(
+                    "message.explainstone.broadcast.no_permission"), false);
+        }
         List<String> existing = new ArrayList<>();
         boolean accepted = false;
         if (player.level() instanceof ServerLevel level
                 && player.blockPosition().distSqr(payload.pos()) <= MAX_INTERACT_DISTANCE_SQ
+                && !isOpOnly(player, level, payload.pos())
                 && level.getBlockEntity(payload.pos()) instanceof SpeakerBlockEntity target) {
             accepted = true;
             Path dir = audioDir(level.getServer());
+            List<Track> candidates = new ArrayList<>();
             for (SpeakerPayloads.AudioQuery.Entry entry : payload.entries()) {
                 String sha1 = entry.sha1();
                 if (!isValidSha1(sha1) || !Files.isRegularFile(dir.resolve(sha1 + ".ogg"))) {
                     continue;
                 }
-                Track track = Track.file(sanitizeLabel(entry.label()), sha1);
-                if (!target.getTracks().contains(track)) {
-                    if (target.getTracks().size() >= ExplainstoneConfig.maxPlaylistTracks()) {
-                        player.displayClientMessage(Component.translatable(
-                                "message.explainstone.import.playlist_full",
-                                ExplainstoneConfig.maxPlaylistTracks()), false);
-                        continue;
-                    }
-                    target.addTrack(track);
+                candidates.add(Track.file(sanitizeLabel(entry.label()), sha1));
+            }
+            // 一次加完：只同步一次方块数据，避免 512 条预检刷出 512 次方块更新 喵
+            target.addTracks(candidates);
+            boolean full = false;
+            for (Track track : candidates) {
+                if (target.getTracks().contains(track)) {
+                    existing.add(track.sha1());
+                } else {
+                    full = true;
                 }
-                existing.add(sha1);
+            }
+            if (full) {
+                player.displayClientMessage(Component.translatable(
+                        "message.explainstone.import.playlist_full",
+                        ExplainstoneConfig.maxPlaylistTracks()), false);
             }
             // 直接引用已有文件时也要确保引用表认识这个方块 喵
             AudioUsageRegistry.update(level, payload.pos(), target.getTracks());
@@ -348,6 +481,14 @@ public final class SpeakerNetworking {
         }
         // 和界面操作一样限制交互距离，防止客户端伪造坐标往远处方块上传文件 喵
         if (player.blockPosition().distSqr(payload.pos()) > MAX_INTERACT_DISTANCE_SQ) {
+            return;
+        }
+        if (isOpOnly(player, level, payload.pos())) {
+            // 只提示一次，避免每块都刷屏 喵
+            if (payload.index() == 0) {
+                player.displayClientMessage(Component.translatable(
+                        "message.explainstone.broadcast.no_permission"), false);
+            }
             return;
         }
         if (!isValidSha1(payload.sha1())) {
@@ -368,11 +509,23 @@ public final class SpeakerNetworking {
         if (part == null || part.length > SpeakerPayloads.CHUNK_SIZE) {
             return;
         }
+        // 先确认目标方块真的是讲解石/发信器，避免恶意客户端用任意坐标制造大量半截上传 喵
+        SpeakerBlockEntity target = level.getBlockEntity(payload.pos()) instanceof SpeakerBlockEntity be ? be : null;
+        if (target == null) {
+            return;
+        }
 
-        String key = player.getUUID() + "/" + payload.pos().toShortString() + "/" + payload.sha1();
+        String playerPrefix = player.getUUID() + "/";
+        String key = playerPrefix + payload.pos().toShortString() + "/" + payload.sha1();
         Upload upload = UPLOADS.get(key);
         if (upload == null || upload.total != payload.total()) {
             UPLOADS.remove(key);
+            if (UPLOADS.size() >= ExplainstoneConfig.maxUploadsTotal()
+                    || countUploads(playerPrefix) >= ExplainstoneConfig.maxUploadsPerPlayer()) {
+                player.displayClientMessage(Component.translatable(
+                        "message.explainstone.import.busy"), false);
+                return;
+            }
             upload = new Upload(payload.total());
             UPLOADS.put(key, upload);
         }
@@ -384,6 +537,13 @@ public final class SpeakerNetworking {
             UPLOADS.remove(key);
             player.displayClientMessage(Component.translatable("message.explainstone.import.too_large",
                     ExplainstoneConfig.maxAudioFileMb()), false);
+            return;
+        }
+        // 全服半截上传总内存封顶，防止多人/多开把服务端堆爆 喵
+        if (totalUploadBytes() > ExplainstoneConfig.maxUploadBufferBytes()) {
+            UPLOADS.remove(key);
+            player.displayClientMessage(Component.translatable(
+                    "message.explainstone.import.busy"), false);
             return;
         }
         if (!upload.complete()) {
@@ -402,21 +562,23 @@ public final class SpeakerNetworking {
             return;
         }
         int seconds = oggSeconds(bytes);
+        // 必须能解析出 Vorbis 头 / 末尾 granule：畸形文件之后每次建会话都要全文件扫描，可能被用来刷磁盘 喵
+        if (seconds < 0) {
+            player.displayClientMessage(Component.translatable("message.explainstone.import.not_ogg"), false);
+            return;
+        }
         if (seconds > ExplainstoneConfig.maxAudioDurationSeconds()) {
             player.displayClientMessage(Component.translatable("message.explainstone.import.too_long",
                     ExplainstoneConfig.maxAudioDurationSeconds()), false);
             return;
         }
 
-        SpeakerBlockEntity target = level.getBlockEntity(payload.pos()) instanceof SpeakerBlockEntity be ? be : null;
-        if (target == null) {
-            player.displayClientMessage(Component.translatable("message.explainstone.import.failed"), false);
-            return;
-        }
         String label = sanitizeLabel(payload.label());
         Track track = Track.file(label, payload.sha1());
         if (!target.getTracks().contains(track)
-                && target.getTracks().size() >= ExplainstoneConfig.maxPlaylistTracks()) {
+                && (target.getTracks().size() >= ExplainstoneConfig.maxPlaylistTracks()
+                || PlaybackRegistry.encodedLength(target.getTracks()) + PlaybackRegistry.encodedLength(track)
+                > SpeakerPayloads.MAX_PLAYLIST_CHARS)) {
             player.displayClientMessage(Component.translatable("message.explainstone.import.playlist_full",
                     ExplainstoneConfig.maxPlaylistTracks()), false);
             return;
@@ -434,9 +596,8 @@ public final class SpeakerNetworking {
             player.displayClientMessage(Component.translatable("message.explainstone.import.failed"), false);
             return;
         }
-        if (seconds > 0) {
-            DURATION_CACHE.put(payload.sha1(), seconds);
-        }
+        // 时长 0 也缓存，避免之后每次建会话都重新扫这个文件 喵
+        DURATION_CACHE.put(payload.sha1(), Math.max(0, seconds));
 
         if (!target.getTracks().contains(track) && target.addTrack(track) < 0) {
             player.displayClientMessage(Component.translatable("message.explainstone.import.playlist_full",
@@ -448,17 +609,26 @@ public final class SpeakerNetworking {
         player.displayClientMessage(Component.translatable("message.explainstone.import.ok", label), true);
     }
 
-    /** 清除 label 里会破坏播放列表编码的分隔符，并限制长度 喵 */
-    private static String sanitizeLabel(String label) {
+    /** 清除 label 里会破坏播放列表编码的分隔符、格式化符和控制字符，并限制长度 喵 */
+    static String sanitizeLabel(String label) {
         if (label == null) {
             return "audio";
         }
-        String cleaned = label.replace('\u0001', ' ').replace('\u0002', ' ')
-                .replace('\n', ' ').replace('\r', ' ').trim();
-        if (cleaned.length() > SpeakerPayloads.MAX_LABEL_LENGTH) {
-            cleaned = cleaned.substring(0, SpeakerPayloads.MAX_LABEL_LENGTH);
+        StringBuilder cleaned = new StringBuilder(label.length());
+        for (int i = 0; i < label.length(); i++) {
+            char c = label.charAt(i);
+            // § 会让客户端把曲目名当格式化文本，ISO 控制字符会破坏列表编码/显示 喵
+            if (c == '\u00a7' || Character.isISOControl(c)) {
+                cleaned.append(' ');
+            } else {
+                cleaned.append(c);
+            }
         }
-        return cleaned.isEmpty() ? "audio" : cleaned;
+        String result = cleaned.toString().trim();
+        if (result.length() > SpeakerPayloads.MAX_LABEL_LENGTH) {
+            result = result.substring(0, SpeakerPayloads.MAX_LABEL_LENGTH);
+        }
+        return result.isEmpty() ? "audio" : result;
     }
 
     /** SHA-1 只接受 40 位小写十六进制（文件名直接用它，拒绝路径穿越） 喵 */
@@ -537,7 +707,7 @@ public final class SpeakerNetworking {
     private static int oggSeconds(Path path) {
         try {
             long size = Files.size(path);
-            if (size <= 0) {
+            if (size <= 0 || size > ExplainstoneConfig.maxAudioFileBytes()) {
                 return -1;
             }
             int headLength = (int) Math.min(size, 64 * 1024);
@@ -585,7 +755,7 @@ public final class SpeakerNetworking {
             return 0;
         }
         String sha1 = track.sha1();
-        if (sha1.isEmpty()) {
+        if (!isValidSha1(sha1)) {
             return 0;
         }
         Integer cached = DURATION_CACHE.get(sha1);
@@ -597,11 +767,9 @@ public final class SpeakerNetworking {
             return 0;
         }
         int seconds = oggSeconds(file);
-        if (seconds > 0) {
-            DURATION_CACHE.put(sha1, seconds);
-            return seconds;
-        }
-        return 0;
+        // 解析失败也缓存 0，避免每次建会话都重新扫文件（防止被刷磁盘） 喵
+        DURATION_CACHE.put(sha1, Math.max(0, seconds));
+        return Math.max(0, seconds);
     }
 
     private static boolean isOgg(byte[] bytes) {
@@ -614,6 +782,10 @@ public final class SpeakerNetworking {
         if (player == null || player.getServer() == null) {
             return;
         }
+        // 下载请求限速：防止伪造包把大文件反复读进内存再刷给客户端 喵
+        if (!allowAudioRequest(player)) {
+            return;
+        }
         String sha1 = payload.sha1();
         if (!isValidSha1(sha1)) {
             return;
@@ -623,14 +795,35 @@ public final class SpeakerNetworking {
             return;
         }
         try {
-            byte[] bytes = Files.readAllBytes(file);
-            int total = (bytes.length + SpeakerPayloads.CHUNK_SIZE - 1) / SpeakerPayloads.CHUNK_SIZE;
-            for (int i = 0; i < total; i++) {
-                int from = i * SpeakerPayloads.CHUNK_SIZE;
-                int len = Math.min(SpeakerPayloads.CHUNK_SIZE, bytes.length - from);
-                byte[] part = new byte[len];
-                System.arraycopy(bytes, from, part, 0, len);
-                sendToPlayer(player, new SpeakerPayloads.AudioChunk(sha1, sha1, i, total, part));
+            long size = Files.size(file);
+            if (size <= 0L || size > ExplainstoneConfig.maxAudioFileBytes()) {
+                return;
+            }
+            // 按文件大小扣下载流量预算（默认 128 MB 突发 / 8 MB/s 回填） 喵
+            if (!allowAudioBytes(player, size)) {
+                return;
+            }
+            int total = (int) ((size + SpeakerPayloads.CHUNK_SIZE - 1L) / SpeakerPayloads.CHUNK_SIZE);
+            // 分块读文件：不再一次性 readAllBytes，避免几个并发请求就吃掉上百 MB 堆 喵
+            try (InputStream in = Files.newInputStream(file)) {
+                byte[] buffer = new byte[SpeakerPayloads.CHUNK_SIZE];
+                for (int i = 0; i < total; i++) {
+                    int want = (int) Math.min(SpeakerPayloads.CHUNK_SIZE, size - (long) i * SpeakerPayloads.CHUNK_SIZE);
+                    int read = 0;
+                    while (read < want) {
+                        int n = in.read(buffer, read, want - read);
+                        if (n < 0) {
+                            break;
+                        }
+                        read += n;
+                    }
+                    if (read <= 0) {
+                        break;
+                    }
+                    byte[] part = new byte[read];
+                    System.arraycopy(buffer, 0, part, 0, read);
+                    sendToPlayer(player, new SpeakerPayloads.AudioChunk(sha1, sha1, i, total, part));
+                }
             }
         } catch (IOException ignored) {
         }

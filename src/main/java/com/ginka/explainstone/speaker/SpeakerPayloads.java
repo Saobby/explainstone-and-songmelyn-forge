@@ -49,8 +49,48 @@ public final class SpeakerPayloads {
     public static final int MAX_LABEL_LENGTH = 128;
     /** SHA-1 固定 40 位小写十六进制 喵 */
     public static final int SHA1_LENGTH = 40;
+    /**
+     * 单个分片（一帧）里最多携带多少个编码字符。UTF-8 最坏 3 字节/字符 → 约 192 KiB，
+     * 远低于 Minecraft 单帧 2 MiB（21 位长度 varint）的上限。 喵
+     */
+    public static final int MAX_PART_CHARS = 65_536;
+    /**
+     * 一个播放会话最多允许多少个编码字符（仅作为客户端内存上限）。
+     * 默认 10000 首 × (128 label + 1 + 45 id + 1) ≈ 1.75M，留一点余量。 喵
+     */
+    public static final int MAX_PLAYLIST_CHARS = 2_000_000;
+    /** 最多允许多少个分片（防御恶意服务端/异常数据） 喵 */
+    public static final int MAX_PARTS = 512;
 
     private SpeakerPayloads() {
+    }
+
+    /**
+     * 把编码后的播放列表切成多个分片。
+     * 优先在曲目分隔符 \u0002 处切，避免把 label 切坏；单条曲目异常长时才退到
+     * 安全的字符边界（不会切在代理对中间）。拼起来必须与原文完全一致。 喵
+     */
+    public static List<String> splitTracks(String encoded) {
+        if (encoded == null || encoded.isEmpty()) {
+            return List.of("");
+        }
+        List<String> parts = new ArrayList<>();
+        int start = 0;
+        while (start < encoded.length()) {
+            int end = Math.min(encoded.length(), start + MAX_PART_CHARS);
+            if (end < encoded.length()) {
+                int cut = encoded.lastIndexOf('\u0002', end - 1);
+                if (cut >= start) {
+                    end = cut + 1;   // 分片带着分隔符，拼接时不会丢内容 喵
+                } else if (Character.isLowSurrogate(encoded.charAt(end))
+                        && Character.isHighSurrogate(encoded.charAt(end - 1))) {
+                    end--;   // 不要切在代理对中间 喵
+                }
+            }
+            parts.add(encoded.substring(start, end));
+            start = end;
+        }
+        return List.copyOf(parts);
     }
 
     /** 播放 / 停止 / 切模式 / 红石开关 / 选曲 / 删曲 喵 */
@@ -70,16 +110,16 @@ public final class SpeakerPayloads {
     public record ImportChunk(BlockPos pos, String label, String sha1, int index, int total, byte[] data) {
         public void encode(FriendlyByteBuf buf) {
             buf.writeBlockPos(this.pos);
-            buf.writeUtf(this.label);
-            buf.writeUtf(this.sha1);
+            buf.writeUtf(this.label, MAX_LABEL_LENGTH);
+            buf.writeUtf(this.sha1, SHA1_LENGTH);
             buf.writeVarInt(this.index);
             buf.writeVarInt(this.total);
             buf.writeByteArray(this.data);
         }
 
         public static ImportChunk decode(FriendlyByteBuf buf) {
-            return new ImportChunk(buf.readBlockPos(), buf.readUtf(), buf.readUtf(),
-                    buf.readVarInt(), buf.readVarInt(), buf.readByteArray());
+            return new ImportChunk(buf.readBlockPos(), buf.readUtf(MAX_LABEL_LENGTH), buf.readUtf(SHA1_LENGTH),
+                    buf.readVarInt(), buf.readVarInt(), buf.readByteArray(CHUNK_SIZE));
         }
     }
 
@@ -147,11 +187,11 @@ public final class SpeakerPayloads {
     /** 客户端 → 服务端：本地没有这个音频，请求下载 喵 */
     public record RequestAudio(String sha1) {
         public void encode(FriendlyByteBuf buf) {
-            buf.writeUtf(this.sha1);
+            buf.writeUtf(this.sha1, SHA1_LENGTH);
         }
 
         public static RequestAudio decode(FriendlyByteBuf buf) {
-            return new RequestAudio(buf.readUtf());
+            return new RequestAudio(buf.readUtf(SHA1_LENGTH));
         }
     }
 
@@ -189,60 +229,70 @@ public final class SpeakerPayloads {
         return durations;
     }
 
-    /** 服务端 → 客户端：某频道开始/停止广播（信号范围 512 格） 喵 */
+    /**
+     * 服务端 → 客户端：某频道开始/停止广播（信号范围 512 格）。
+     * 播放列表过大时会拆成 partCount 帧发送，partIndex 从 0 开始；durations 只在第 0 帧带。 喵
+     */
     public record Broadcast(int channel, int mode, boolean active, String tracks, int[] durations,
-                            long elapsedTicks, long revision) {
+                            long elapsedTicks, long revision, int partIndex, int partCount) {
         public void encode(FriendlyByteBuf buf) {
             buf.writeVarInt(this.channel);
             buf.writeVarInt(this.mode);
             buf.writeBoolean(this.active);
-            buf.writeUtf(this.tracks);
+            buf.writeUtf(this.tracks == null ? "" : this.tracks, MAX_PART_CHARS);
             writeDurations(buf, this.durations);
             buf.writeLong(this.elapsedTicks);
             buf.writeLong(this.revision);
+            buf.writeVarInt(this.partIndex);
+            buf.writeVarInt(this.partCount);
         }
 
         public static Broadcast decode(FriendlyByteBuf buf) {
             return new Broadcast(buf.readVarInt(), buf.readVarInt(), buf.readBoolean(),
-                    buf.readUtf(), readDurations(buf), buf.readLong(), buf.readLong());
+                    buf.readUtf(MAX_PART_CHARS), readDurations(buf), buf.readLong(), buf.readLong(),
+                    buf.readVarInt(), buf.readVarInt());
         }
     }
 
     /**
      * 服务端 → 客户端：某个讲解石方块的本地播放会话。
-     * elapsedTicks 是发包时已经播放的游戏 tick 数，客户端再加本地经过的 tick 即可对齐 喵
+     * elapsedTicks 是发包时已经播放的游戏 tick 数，客户端再加本地经过的 tick 即可对齐；
+     * 播放列表过大时会拆成 partCount 帧发送，durations 只在第 0 帧带。 喵
      */
     public record Playback(BlockPos pos, int mode, boolean active, String tracks, int[] durations,
-                           long elapsedTicks, long revision) {
+                           long elapsedTicks, long revision, int partIndex, int partCount) {
         public void encode(FriendlyByteBuf buf) {
             buf.writeBlockPos(this.pos);
             buf.writeVarInt(this.mode);
             buf.writeBoolean(this.active);
-            buf.writeUtf(this.tracks);
+            buf.writeUtf(this.tracks == null ? "" : this.tracks, MAX_PART_CHARS);
             writeDurations(buf, this.durations);
             buf.writeLong(this.elapsedTicks);
             buf.writeLong(this.revision);
+            buf.writeVarInt(this.partIndex);
+            buf.writeVarInt(this.partCount);
         }
 
         public static Playback decode(FriendlyByteBuf buf) {
             return new Playback(buf.readBlockPos(), buf.readVarInt(), buf.readBoolean(),
-                    buf.readUtf(), readDurations(buf), buf.readLong(), buf.readLong());
+                    buf.readUtf(MAX_PART_CHARS), readDurations(buf), buf.readLong(), buf.readLong(),
+                    buf.readVarInt(), buf.readVarInt());
         }
     }
 
     /** 服务端 → 客户端：音频文件分块（label 只是给缓存起个可读的名字） 喵 */
     public record AudioChunk(String sha1, String label, int index, int total, byte[] data) {
         public void encode(FriendlyByteBuf buf) {
-            buf.writeUtf(this.sha1);
-            buf.writeUtf(this.label);
+            buf.writeUtf(this.sha1, SHA1_LENGTH);
+            buf.writeUtf(this.label, MAX_LABEL_LENGTH);
             buf.writeVarInt(this.index);
             buf.writeVarInt(this.total);
             buf.writeByteArray(this.data);
         }
 
         public static AudioChunk decode(FriendlyByteBuf buf) {
-            return new AudioChunk(buf.readUtf(), buf.readUtf(),
-                    buf.readVarInt(), buf.readVarInt(), buf.readByteArray());
+            return new AudioChunk(buf.readUtf(SHA1_LENGTH), buf.readUtf(MAX_LABEL_LENGTH),
+                    buf.readVarInt(), buf.readVarInt(), buf.readByteArray(CHUNK_SIZE));
         }
     }
 }

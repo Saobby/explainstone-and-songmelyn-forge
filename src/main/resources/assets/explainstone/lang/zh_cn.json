@@ -53,6 +53,7 @@
   "message.explainstone.import.playlist_full": "播放列表已满（最多 %s 首）。",
   "message.explainstone.import.sha_mismatch": "上传被拒绝：SHA-1 校验不一致。",
   "message.explainstone.import.failed": "保存音频失败。",
+  "message.explainstone.import.busy": "上传请求太多，请稍后再试。",
   "message.explainstone.import.read_failed": "读取文件失败：%s",
   "message.explainstone.import.check_timeout": "服务端没有响应音频预检，已取消上传。",
   "message.explainstone.import.queued": "已加入导入队列：%s 个 ogg",

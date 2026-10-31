@@ -32,6 +32,11 @@ Port of the Fabric 1.21.1 edition of **Explainstone / Songmelyn / Broadcast Tran
   start tick for every speaker / channel broadcast. Clients compute the current track and
   offset from that timeline, so all players are in sync and leaving/re-entering range no
   longer restarts the song.
+* Playlists larger than one network frame are split on track boundaries into parts of at
+  most 64k characters (each part carries its index, total part count and the session
+  revision). Clients reassemble the parts before applying the timeline; the periodic
+  session resend sends the full part set again, so late joiners and lost packets self-heal.
+  This removes the old single-frame size limit on large playlists.
 * One volume slider controls both loudness and audible range:
   `effective range = audibleRangeAtFullVolume × volume / 100`. Setting it to 0 mutes the
   speaker, so there is no separate sound on/off toggle. Local playback vs. receive mode is
@@ -76,6 +81,8 @@ Forge config file: `config/explainstone-common.toml`
 
 ```toml
 broadcastRequiresOp = false
+# When true, only operators (permission level 2) can start a broadcast. Redstone
+# power cannot start one in this mode either (it can still stop one).
 # Audible range in blocks at 100% volume. The effective range scales linearly
 # with volume; keep this value identical on client and server.
 audibleRangeAtFullVolume = 40
@@ -97,6 +104,21 @@ maxAudioFileMb = 10
 maxAudioDurationSeconds = 600
 # Maximum number of tracks in one playlist (1-10000).
 maxPlaylistTracks = 500
+# --- Server-side anti-abuse limits (defaults are generous for normal play) ---
+# Simultaneous chunked imports per player / on the whole server, and the total
+# memory budget for incomplete uploads in MiB.
+maxUploadsPerPlayer = 4
+maxUploadsTotal = 128
+maxUploadBufferMb = 256
+# Interface action token bucket: burst capacity and refill per second.
+actionBurst = 30
+actionRefillPerSecond = 15
+# Audio download request bucket: burst capacity and refill per second.
+audioRequestBurst = 24
+audioRequestRefillPerSecond = 6
+# Audio download traffic bucket per player: burst in MiB and refill in MiB/s.
+audioDownloadBurstMb = 128
+audioDownloadMbPerSecond = 8
 ```
 
 Keep the three import-limit values identical on the client and the server: the client

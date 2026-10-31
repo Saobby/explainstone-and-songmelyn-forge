@@ -86,13 +86,43 @@ public class SpeakerBlockEntity extends BlockEntity {
     }
 
     public int addTrack(Track track) {
-        if (this.tracks.size() >= ExplainstoneConfig.maxPlaylistTracks()) {
+        if (track == null) {
             return -1;
         }
-        this.tracks.add(track);
-        this.sync();
-        this.refreshAudioUsage();
-        return this.tracks.size() - 1;
+        return this.addTracks(List.of(track)) > 0 ? this.tracks.size() - 1 : -1;
+    }
+
+    /**
+     * 批量加入曲目：数量上限、编码后的网络包大小都在这里统一限制；
+     * 只同步一次、只刷新一次音频引用，避免一次预检刷出大量方块更新。 喵
+     */
+    public int addTracks(List<Track> tracks) {
+        if (tracks == null || tracks.isEmpty()) {
+            return 0;
+        }
+        int max = ExplainstoneConfig.maxPlaylistTracks();
+        long encoded = PlaybackRegistry.encodedLength(this.tracks);
+        int added = 0;
+        for (Track track : tracks) {
+            if (track == null || this.tracks.contains(track)) {
+                continue;
+            }
+            if (this.tracks.size() >= max) {
+                break;
+            }
+            long length = PlaybackRegistry.encodedLength(track);
+            if (encoded + length > SpeakerPayloads.MAX_PLAYLIST_CHARS) {
+                break;   // 再加就超过列表上限了 喵
+            }
+            this.tracks.add(track);
+            encoded += length;
+            added++;
+        }
+        if (added > 0) {
+            this.sync();
+            this.refreshAudioUsage();
+        }
+        return added;
     }
 
     public void removeTrack(int index) {
@@ -208,13 +238,14 @@ public class SpeakerBlockEntity extends BlockEntity {
     }
 
     public void setTimerSeconds(int seconds) {
-        this.timerSeconds = Math.max(0, seconds);
+        // 客户端可以传任意 int：限制在 0..24 小时，避免倒计时溢出 喵
+        this.timerSeconds = Math.max(0, Math.min(86_400, seconds));
         this.sync();
     }
 
     /** 发信器开始广播时调用：启动定时倒计时 喵 */
     public void startTimer() {
-        this.ticksLeft = this.timerSeconds * 20;
+        this.ticksLeft = (int) Math.min(Integer.MAX_VALUE, (long) this.timerSeconds * 20L);
     }
 
     public void stopTimer() {
@@ -282,11 +313,16 @@ public class SpeakerBlockEntity extends BlockEntity {
         super.load(nbt);
         this.tracks.clear();
         ListTag list = nbt.getList("tracks", Tag.TAG_COMPOUND);
-        for (int i = 0; i < list.size(); i++) {
-            this.tracks.add(Track.fromNbt(list.getCompound(i)));
+        int limit = Math.max(1, ExplainstoneConfig.maxPlaylistTracks());
+        for (int i = 0; i < list.size() && this.tracks.size() < limit; i++) {
+            Track track = Track.fromNbt(list.getCompound(i));
+            // 只接受能解析的曲目；file: 必须是合法 SHA-1（防止路径穿越 / 畸形存档） 喵
+            if (!resolvable(track)) {
+                continue;
+            }
+            this.tracks.add(sanitizeLoaded(track));
         }
-        // 包内已不再附带音频：把解析不到的 builtin 曲目剔掉，避免"列表里有、点了不出声" 喵
-        this.tracks.removeIf(track -> !resolvable(track));
+        trimTracksToPacketBudget();
         this.selected = nbt.getInt("selected");
         for (PlayMode value : PlayMode.values()) {
             if (value.getSerializedName().equals(nbt.getString("mode"))) {
@@ -306,7 +342,7 @@ public class SpeakerBlockEntity extends BlockEntity {
             this.receiveMode = nbt.getBoolean("receiveMode");
         }
         if (nbt.contains("timerSeconds")) {
-            this.timerSeconds = Math.max(0, nbt.getInt("timerSeconds"));
+            this.timerSeconds = Math.max(0, Math.min(86_400, nbt.getInt("timerSeconds")));
         }
         if (nbt.contains("transmitRange")) {
             this.transmitRange = Math.max(32, Math.min(512, nbt.getInt("transmitRange")));
@@ -316,10 +352,29 @@ public class SpeakerBlockEntity extends BlockEntity {
         }
     }
 
+    /** 老存档 / 被 /data 改过的 label 可能超长或带格式符，清洗后再进列表（同时限制同步包大小） 喵 */
+    private static Track sanitizeLoaded(Track track) {
+        String label = SpeakerNetworking.sanitizeLabel(track.label());
+        return label.equals(track.label()) ? track : new Track(label, track.id());
+    }
+
+    /** 保证整张列表编码后不超过上限（分片发送，已不再受单帧大小限制） 喵 */
+    private void trimTracksToPacketBudget() {
+        long encoded = PlaybackRegistry.encodedLength(this.tracks);
+        while (encoded > SpeakerPayloads.MAX_PLAYLIST_CHARS && !this.tracks.isEmpty()) {
+            Track removed = this.tracks.remove(this.tracks.size() - 1);
+            encoded -= PlaybackRegistry.encodedLength(removed);
+        }
+    }
+
     /** 这条曲目还能不能放：导入曲目看文件，内置曲目看 jar 里有没有对应 ogg 喵 */
     private static boolean resolvable(Track track) {
+        if (track == null || track.id() == null) {
+            return false;
+        }
         if (track.isFile()) {
-            return true;
+            // file:<sha1> 的 sha1 会直接当文件名用，必须是 40 位小写十六进制 喵
+            return SpeakerNetworking.isValidSha1(track.sha1());
         }
         String name = track.builtinName();
         if (!name.matches("[a-z0-9_\\-]+")) {
