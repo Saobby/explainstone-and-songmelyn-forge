@@ -12,6 +12,7 @@
  */
 package com.ginka.explainstone;
 
+import com.ginka.explainstone.speaker.AudioUsageRegistry;
 import com.ginka.explainstone.speaker.PlaybackRegistry;
 import com.ginka.explainstone.speaker.SpeakerBlockEntity;
 import net.minecraft.core.BlockPos;
@@ -37,6 +38,8 @@ import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.shapes.CollisionContext;
 import net.minecraft.world.phys.shapes.VoxelShape;
 import org.jetbrains.annotations.Nullable;
+
+import java.util.List;
 
 public class SpeakerBlock extends Block implements EntityBlock {
     /** 是否正在播放（红石触发或界面按钮都会改它） 喵 */
@@ -98,6 +101,7 @@ public class SpeakerBlock extends Block implements EntityBlock {
         }
         return (lvl, pos, st, be) -> {
             if (lvl instanceof ServerLevel serverLevel && be instanceof SpeakerBlockEntity speaker) {
+                speaker.ensureAudioUsageRegistered();
                 PlaybackRegistry.tick(serverLevel, pos, st, speaker);
             }
         };
@@ -143,6 +147,8 @@ public class SpeakerBlock extends Block implements EntityBlock {
     public void onRemove(BlockState state, Level level, BlockPos pos, BlockState newState, boolean moved) {
         if (!level.isClientSide && !state.is(newState.getBlock()) && level instanceof ServerLevel serverLevel) {
             PlaybackRegistry.stop(serverLevel, pos);
+            // 方块没了 → 从这个音频的使用者列表里移除；没人用了就删存档里的文件 喵
+            AudioUsageRegistry.update(serverLevel, pos, List.of());
         }
         super.onRemove(state, level, pos, newState, moved);
     }

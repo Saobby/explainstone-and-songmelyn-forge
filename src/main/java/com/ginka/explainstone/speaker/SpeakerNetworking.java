@@ -38,6 +38,7 @@ import java.io.RandomAccessFile;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.MessageDigest;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
@@ -50,8 +51,8 @@ import java.util.function.Supplier;
  * 音频库位置：&lt;存档&gt;/explainstone/audio/&lt;sha1&gt;.ogg 喵
  */
 public final class SpeakerNetworking {
-    /** 网络协议版本（含时长元数据，旧客户端会被安全拒绝） 喵 */
-    private static final String PROTOCOL_VERSION = "3";
+    /** 网络协议版本（含上传前 SHA-1 预检，旧客户端会被安全拒绝） 喵 */
+    private static final String PROTOCOL_VERSION = "4";
     /** 界面操作的最大有效距离（格） 喵 */
     private static final double MAX_INTERACT_DISTANCE_SQ = 64 * 64;
 
@@ -99,6 +100,14 @@ public final class SpeakerNetworking {
         CHANNEL.registerMessage(6, SpeakerPayloads.Playback.class,
                 SpeakerPayloads.Playback::encode, SpeakerPayloads.Playback::decode,
                 SpeakerNetworking::handlePlayback, Optional.of(NetworkDirection.PLAY_TO_CLIENT));
+
+        // 上传前预检：客户端先发 SHA-1 列表，服务端告诉它哪些已经有了 喵
+        CHANNEL.registerMessage(7, SpeakerPayloads.AudioQuery.class,
+                SpeakerPayloads.AudioQuery::encode, SpeakerPayloads.AudioQuery::decode,
+                SpeakerNetworking::handleQuery, Optional.of(NetworkDirection.PLAY_TO_SERVER));
+        CHANNEL.registerMessage(8, SpeakerPayloads.AudioQueryResult.class,
+                SpeakerPayloads.AudioQueryResult::encode, SpeakerPayloads.AudioQueryResult::decode,
+                SpeakerNetworking::handleQueryResult, Optional.of(NetworkDirection.PLAY_TO_CLIENT));
     }
 
     public static void sendToPlayer(ServerPlayer player, Object message) {
@@ -140,6 +149,16 @@ public final class SpeakerNetworking {
         return server.getWorldPath(LevelResource.ROOT).resolve("explainstone").resolve("audio");
     }
 
+    /** 存档里某份音频的路径 喵 */
+    public static Path audioFile(MinecraftServer server, String sha1) {
+        return audioDir(server).resolve(sha1 + ".ogg");
+    }
+
+    /** 音频文件被删掉后清掉时长缓存，避免之后又按旧时长排时间轴 喵 */
+    static void forgetDuration(String sha1) {
+        DURATION_CACHE.remove(sha1);
+    }
+
     // ------------------------------------------------------------ 包处理入口 喵
     private static void handleAction(SpeakerPayloads.Action payload, Supplier<NetworkEvent.Context> ctx) {
         NetworkEvent.Context context = ctx.get();
@@ -150,6 +169,19 @@ public final class SpeakerNetworking {
     private static void handleImportChunk(SpeakerPayloads.ImportChunk payload, Supplier<NetworkEvent.Context> ctx) {
         NetworkEvent.Context context = ctx.get();
         context.enqueueWork(() -> applyImport(context.getSender(), payload));
+        context.setPacketHandled(true);
+    }
+
+    private static void handleQuery(SpeakerPayloads.AudioQuery payload, Supplier<NetworkEvent.Context> ctx) {
+        NetworkEvent.Context context = ctx.get();
+        context.enqueueWork(() -> applyQuery(context.getSender(), payload));
+        context.setPacketHandled(true);
+    }
+
+    private static void handleQueryResult(SpeakerPayloads.AudioQueryResult payload, Supplier<NetworkEvent.Context> ctx) {
+        NetworkEvent.Context context = ctx.get();
+        context.enqueueWork(() -> DistExecutor.unsafeRunWhenOn(Dist.CLIENT,
+                () -> () -> com.ginka.explainstone.client.ClientNetworkHandler.handleAudioQueryResult(payload)));
         context.setPacketHandled(true);
     }
 
@@ -264,6 +296,45 @@ public final class SpeakerNetworking {
     }
 
     // ------------------------------------------------------------ 导入文件 喵
+    /**
+     * 上传前预检：把客户端要上传的 SHA-1 列表和服务端已有文件比对。
+     * 已经存在的音频直接把曲目录进这个方块的播放列表（客户端就不必再传一遍了）。 喵
+     */
+    private static void applyQuery(ServerPlayer player, SpeakerPayloads.AudioQuery payload) {
+        if (player == null) {
+            return;
+        }
+        List<String> existing = new ArrayList<>();
+        boolean accepted = false;
+        if (player.level() instanceof ServerLevel level
+                && player.blockPosition().distSqr(payload.pos()) <= MAX_INTERACT_DISTANCE_SQ
+                && level.getBlockEntity(payload.pos()) instanceof SpeakerBlockEntity target) {
+            accepted = true;
+            Path dir = audioDir(level.getServer());
+            for (SpeakerPayloads.AudioQuery.Entry entry : payload.entries()) {
+                String sha1 = entry.sha1();
+                if (!isValidSha1(sha1) || !Files.isRegularFile(dir.resolve(sha1 + ".ogg"))) {
+                    continue;
+                }
+                Track track = Track.file(sanitizeLabel(entry.label()), sha1);
+                if (!target.getTracks().contains(track)) {
+                    if (target.getTracks().size() >= ExplainstoneConfig.maxPlaylistTracks()) {
+                        player.displayClientMessage(Component.translatable(
+                                "message.explainstone.import.playlist_full",
+                                ExplainstoneConfig.maxPlaylistTracks()), false);
+                        continue;
+                    }
+                    target.addTrack(track);
+                }
+                existing.add(sha1);
+            }
+            // 直接引用已有文件时也要确保引用表认识这个方块 喵
+            AudioUsageRegistry.update(level, payload.pos(), target.getTracks());
+        }
+        sendToPlayer(player, new SpeakerPayloads.AudioQueryResult(
+                payload.pos(), payload.queryId(), accepted, existing));
+    }
+
     private static void applyImport(ServerPlayer player, SpeakerPayloads.ImportChunk payload) {
         if (player == null || !(player.level() instanceof ServerLevel level)) {
             return;
@@ -347,7 +418,11 @@ public final class SpeakerNetworking {
         try {
             Path dir = audioDir(level.getServer());
             Files.createDirectories(dir);
-            Files.write(dir.resolve(payload.sha1() + ".ogg"), bytes);
+            Path file = dir.resolve(payload.sha1() + ".ogg");
+            // 预检之后又有人传了同一份音频时不必重复写盘 喵
+            if (!Files.isRegularFile(file)) {
+                Files.write(file, bytes);
+            }
         } catch (IOException e) {
             player.displayClientMessage(Component.translatable("message.explainstone.import.failed"), false);
             return;
@@ -361,6 +436,8 @@ public final class SpeakerNetworking {
                     ExplainstoneConfig.maxPlaylistTracks()), false);
             return;
         }
+        // 列表里本来就有同一条曲目时 addTrack 不会触发，这里补登记一次引用 喵
+        AudioUsageRegistry.update(level, payload.pos(), target.getTracks());
         player.displayClientMessage(Component.translatable("message.explainstone.import.ok", label), true);
     }
 
@@ -371,14 +448,15 @@ public final class SpeakerNetworking {
         }
         String cleaned = label.replace('\u0001', ' ').replace('\u0002', ' ')
                 .replace('\n', ' ').replace('\r', ' ').trim();
-        if (cleaned.length() > 128) {
-            cleaned = cleaned.substring(0, 128);
+        if (cleaned.length() > SpeakerPayloads.MAX_LABEL_LENGTH) {
+            cleaned = cleaned.substring(0, SpeakerPayloads.MAX_LABEL_LENGTH);
         }
         return cleaned.isEmpty() ? "audio" : cleaned;
     }
 
-    private static boolean isValidSha1(String sha1) {
-        if (sha1 == null || sha1.length() != 40) {
+    /** SHA-1 只接受 40 位小写十六进制（文件名直接用它，拒绝路径穿越） 喵 */
+    static boolean isValidSha1(String sha1) {
+        if (sha1 == null || sha1.length() != SpeakerPayloads.SHA1_LENGTH) {
             return false;
         }
         for (int i = 0; i < sha1.length(); i++) {

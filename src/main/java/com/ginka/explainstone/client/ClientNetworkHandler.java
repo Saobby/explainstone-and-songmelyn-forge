@@ -14,6 +14,7 @@ package com.ginka.explainstone.client;
 
 import com.ginka.explainstone.client.audio.SpeakerAudio;
 import com.ginka.explainstone.client.audio.SpeakerAudioCache;
+import com.ginka.explainstone.client.audio.SpeakerUploader;
 import com.ginka.explainstone.speaker.SpeakerPayloads;
 
 /** 客户端网络包处理（由通用包处理器通过 DistExecutor 调用） 喵 */
@@ -31,5 +32,10 @@ public final class ClientNetworkHandler {
 
     public static void handlePlayback(SpeakerPayloads.Playback payload) {
         SpeakerAudio.onPlayback(payload);
+    }
+
+    /** 上传前预检结果：告诉上传队列哪些音频不用再传 喵 */
+    public static void handleAudioQueryResult(SpeakerPayloads.AudioQueryResult payload) {
+        SpeakerUploader.onQueryResult(payload);
     }
 }

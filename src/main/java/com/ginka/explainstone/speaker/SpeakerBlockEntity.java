@@ -19,6 +19,7 @@ import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.ListTag;
 import net.minecraft.nbt.Tag;
 import net.minecraft.network.protocol.game.ClientboundBlockEntityDataPacket;
+import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.entity.BlockEntityType;
@@ -52,6 +53,8 @@ public class SpeakerBlockEntity extends BlockEntity {
     private int timerSeconds;
     /** 定时倒计时（tick），运行时用 喵 */
     private int ticksLeft;
+    /** 是否已经把播放列表登记进服务端音频引用表 喵 */
+    private boolean audioUsageRegistered;
 
     public SpeakerBlockEntity(BlockEntityType<?> type, BlockPos pos, BlockState state) {
         super(type, pos, state);
@@ -90,6 +93,7 @@ public class SpeakerBlockEntity extends BlockEntity {
         }
         this.tracks.add(track);
         this.sync();
+        this.refreshAudioUsage();
         return this.tracks.size() - 1;
     }
 
@@ -100,6 +104,7 @@ public class SpeakerBlockEntity extends BlockEntity {
                 this.selected = Math.max(0, this.tracks.size() - 1);
             }
             this.sync();
+            this.refreshAudioUsage();
         }
     }
 
@@ -109,6 +114,31 @@ public class SpeakerBlockEntity extends BlockEntity {
             this.tracks.clear();
             this.selected = 0;
             this.sync();
+            this.refreshAudioUsage();
+        }
+    }
+
+    /**
+     * 区块加载 / 方块实体进入世界时登记「音频 → 音响」引用。
+     * 引用表的其它入口（增删曲目、拆方块）也会调用它。 喵
+     */
+    @Override
+    public void onLoad() {
+        this.refreshAudioUsage();
+    }
+
+    /** 服务端 ticker 兜底：某些加载路径不会走 onLoad，这里补登记一次 喵 */
+    public void ensureAudioUsageRegistered() {
+        if (!this.audioUsageRegistered) {
+            this.refreshAudioUsage();
+        }
+    }
+
+    /** 把当前播放列表里的导入音频登记到服务端引用表 喵 */
+    private void refreshAudioUsage() {
+        if (this.level instanceof ServerLevel serverLevel) {
+            this.audioUsageRegistered = true;
+            AudioUsageRegistry.update(serverLevel, this.worldPosition, this.tracks);
         }
     }
 

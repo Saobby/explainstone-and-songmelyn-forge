@@ -12,6 +12,7 @@
  */
 package com.ginka.explainstone;
 
+import com.ginka.explainstone.speaker.AudioUsageRegistry;
 import com.ginka.explainstone.speaker.BroadcastRegistry;
 import com.ginka.explainstone.speaker.SpeakerBlockEntity;
 import net.minecraft.core.BlockPos;
@@ -34,6 +35,8 @@ import net.minecraft.world.level.block.state.properties.BooleanProperty;
 import net.minecraft.world.level.block.state.properties.DirectionProperty;
 import net.minecraft.world.phys.BlockHitResult;
 import org.jetbrains.annotations.Nullable;
+
+import java.util.List;
 
 /**
  * 广播发信器：把选中的音乐以某个频道播出去，收信模式的讲解石会自动收听。 喵
@@ -107,6 +110,8 @@ public class BroadcastTransmitterBlock extends Block implements EntityBlock {
     public void onRemove(BlockState state, Level level, BlockPos pos, BlockState newState, boolean moved) {
         if (!level.isClientSide && !state.is(newState.getBlock()) && level instanceof ServerLevel serverLevel) {
             BroadcastRegistry.forget(serverLevel, pos);
+            // 发信器没了 → 从音频的使用者列表里移除；没人用了就删存档里的文件 喵
+            AudioUsageRegistry.update(serverLevel, pos, List.of());
         }
         super.onRemove(state, level, pos, newState, moved);
     }
@@ -132,6 +137,7 @@ public class BroadcastTransmitterBlock extends Block implements EntityBlock {
             if (!(be instanceof SpeakerBlockEntity speaker)) {
                 return;
             }
+            speaker.ensureAudioUsageRegistered();
             BlockState current = w.getBlockState(pos);
             boolean broadcasting = current.getBlock() instanceof BroadcastTransmitterBlock && current.getValue(PLAYING);
             if (broadcasting && w instanceof ServerLevel serverLevel) {

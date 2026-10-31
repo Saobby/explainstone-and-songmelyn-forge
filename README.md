@@ -9,9 +9,17 @@ Port of the Fabric 1.21.1 edition of **Explainstone / Songmelyn / Broadcast Tran
   (`<world>/explainstone/audio/<sha1>.ogg`), then streamed to nearby clients on demand.
   Only the current track and the next track in the playlist are fetched: entering a
   speaker's range no longer downloads the whole playlist up front.
+* Before any bytes are sent, the client asks the server with the SHA-1 list of the files
+  it is about to import. The server reports which ones are already stored, adds those
+  tracks to the speaker/transmitter playlist itself, and the client only uploads the
+  missing files — shared audio is transferred once per world.
+* The server keeps a `sha1 -> speakers/transmitters` usage map
+  (`<world>/explainstone/audio-usage.nbt`). Every playlist change (import, remove,
+  delete-all, block broken, chunk load) updates it; once the last reference is gone the
+  corresponding `.ogg` is deleted from the world save.
 * Client-side imports run asynchronously: reading, SHA-1 hashing and the local cache write
   happen off the render thread, and chunks are sent over multiple client ticks. The block
-  UI shows a local-only "Processing %" / "Uploading %" status.
+  UI shows a local-only "Processing %" / "Checking…" / "Uploading %" status.
 * Import limits are configurable: 10 MB / 10 minutes / 500 tracks per playlist by default.
   The server also re-checks the SHA-1, enforces interaction distance, assembles chunks by
   index and expires abandoned partial uploads.
@@ -90,9 +98,10 @@ maxPlaylistTracks = 500
 ```
 
 Keep the three import-limit values identical on the client and the server: the client
-checks file size while preparing an upload, and the server enforces size, SHA-1, duration
-and playlist length when the upload is assembled. Incomplete multi-chunk uploads are
-dropped after two minutes without a new chunk, when the player logs out, or when the
+checks file size while preparing an upload, hashes the files and asks the server which
+SHA-1s already exist before sending anything. The server still enforces size, SHA-1,
+duration and playlist length for the files that do need uploading. Incomplete multi-chunk
+uploads are dropped after two minutes without a new chunk, when the player logs out, or when the
 server stops.
 
 ## Differences from the Fabric edition

@@ -21,17 +21,20 @@ import net.minecraft.network.chat.Component;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.MessageDigest;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ThreadLocalRandom;
 
 /**
  * 客户端异步导入队列：文件读取、SHA-1 和本地缓存都在后台线程做，
@@ -41,10 +44,14 @@ public final class SpeakerUploader {
     private static final Logger LOGGER = LoggerFactory.getLogger("explainstone-upload");
     /** 每 tick 最多发送多少块；8×8000 ≈ 64 KiB/tick 喵 */
     private static final int MAX_CHUNKS_PER_TICK = 8;
+    /** 等服务端回答「这些音频有没有」的最长时间 喵 */
+    private static final long CHECK_TIMEOUT_MS = 15_000L;
     private static final Map<BlockPos, Batch> BATCHES = new ConcurrentHashMap<>();
 
     public enum Phase {
         PROCESSING,
+        /** 已经在读文件并算好了 SHA-1，正等服务端告知哪些已存在 喵 */
+        CHECKING,
         UPLOADING
     }
 
@@ -79,6 +86,17 @@ public final class SpeakerUploader {
     public static Status status(BlockPos pos) {
         Batch batch = BATCHES.get(pos.immutable());
         return batch == null || batch.finished ? null : batch.status();
+    }
+
+    /** 服务端回答了预检请求：把结果交给对应的上传队列 喵 */
+    public static void onQueryResult(SpeakerPayloads.AudioQueryResult payload) {
+        if (payload == null) {
+            return;
+        }
+        Batch batch = BATCHES.get(payload.pos().immutable());
+        if (batch != null) {
+            batch.acceptQueryResult(payload.queryId(), payload.accepted(), payload.existing());
+        }
     }
 
     /** 客户端主线程每 tick 推动一下上传队列 喵 */
@@ -120,6 +138,13 @@ public final class SpeakerUploader {
         private int sentChunks;
         private long currentUploadedBytes;
         private boolean currentUploaded;
+        /** 正在等服务端回答的预检请求；真正发送在主线程 tick 里做 喵 */
+        private SpeakerPayloads.AudioQuery query;
+        private long queryId;
+        private boolean querySent;
+        private boolean checkArrived;
+        private boolean checkAccepted;
+        private Set<String> existing = Set.of();
 
         private Batch(Minecraft client, BlockPos pos, List<Path> paths) {
             this.client = client;
@@ -132,6 +157,8 @@ public final class SpeakerUploader {
                 for (Path path : this.paths) {
                     this.totalBytes += safeSize(path);
                 }
+                // 第一遍：只流式算 SHA-1，不把整批音频都塞进内存 喵
+                List<Scanned> scanned = new ArrayList<>();
                 for (Path path : this.paths) {
                     if (this.cancelled) {
                         return;
@@ -145,8 +172,8 @@ public final class SpeakerUploader {
                     }
                     this.phase = Phase.PROCESSING;
                     this.currentRead = 0L;
-                    Prepared prepared = this.process(path, size);
-                    if (prepared == null) {
+                    Scanned result = this.scan(path);
+                    if (result == null) {
                         if (this.cancelled) {
                             return;
                         }
@@ -154,32 +181,32 @@ public final class SpeakerUploader {
                         this.uploadedBytes += size;
                         continue;
                     }
+                    scanned.add(result);
                     this.processedBytes += size;
                     this.currentRead = 0L;
-                    synchronized (this.lock) {
+                }
+                // 第二遍：先问服务端哪些音频已经存在，只上传不存在的 喵
+                for (int start = 0; start < scanned.size(); start += SpeakerPayloads.MAX_QUERY_ENTRIES) {
+                    if (this.cancelled) {
+                        return;
+                    }
+                    int end = Math.min(scanned.size(), start + SpeakerPayloads.MAX_QUERY_ENTRIES);
+                    List<Scanned> round = List.copyOf(scanned.subList(start, end));
+                    Set<String> known = this.checkWithServer(round);
+                    if (known == null) {
+                        return;
+                    }
+                    for (Scanned item : round) {
                         if (this.cancelled) {
                             return;
                         }
-                        this.current = prepared;
-                        this.sentChunks = 0;
-                        this.currentUploadedBytes = 0L;
-                        this.currentUploaded = false;
-                        this.phase = Phase.UPLOADING;
-                        this.lock.notifyAll();
-                        while (!this.currentUploaded && !this.cancelled) {
-                            try {
-                                this.lock.wait();
-                            } catch (InterruptedException e) {
-                                Thread.currentThread().interrupt();
-                                this.cancelled = true;
-                            }
+                        if (known.contains(item.sha1())) {
+                            // 服务端已有这份音频（预检时已经把曲目加进播放列表），跳过上传 喵
+                            this.cacheLocal(item);
+                            this.uploadedBytes += item.size();
+                            continue;
                         }
-                        this.current = null;
-                        if (this.cancelled) {
-                            return;
-                        }
-                        this.uploadedBytes += prepared.bytes.length;
-                        this.currentUploadedBytes = 0L;
+                        this.upload(item);
                     }
                 }
             } catch (Throwable t) {
@@ -194,11 +221,75 @@ public final class SpeakerUploader {
         }
 
 
-        private Prepared process(Path path, long size) {
+        /** 把这一批 SHA-1 发给服务端预检；返回 null 表示取消 喵 */
+        private Set<String> checkWithServer(List<Scanned> round) {
+            List<SpeakerPayloads.AudioQuery.Entry> entries = new ArrayList<>(round.size());
+            for (Scanned item : round) {
+                entries.add(new SpeakerPayloads.AudioQuery.Entry(item.label(), item.sha1()));
+            }
+            long id = ThreadLocalRandom.current().nextLong();
+            synchronized (this.lock) {
+                this.phase = Phase.CHECKING;
+                this.queryId = id;
+                this.query = new SpeakerPayloads.AudioQuery(this.pos, id, entries);
+                this.querySent = false;
+                this.checkArrived = false;
+                this.checkAccepted = false;
+                this.existing = Set.of();
+                this.lock.notifyAll();
+            }
+            long deadline = System.currentTimeMillis() + CHECK_TIMEOUT_MS;
+            synchronized (this.lock) {
+                while (!this.checkArrived && !this.cancelled) {
+                    long remain = deadline - System.currentTimeMillis();
+                    if (remain <= 0L) {
+                        break;
+                    }
+                    try {
+                        this.lock.wait(remain);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        this.cancelled = true;
+                    }
+                }
+                if (this.cancelled) {
+                    return null;
+                }
+                if (!this.checkArrived) {
+                    error("message.explainstone.import.check_timeout");
+                    this.cancelled = true;
+                    return null;
+                }
+                if (!this.checkAccepted) {
+                    error("message.explainstone.import.failed");
+                    this.cancelled = true;
+                    return null;
+                }
+                this.query = null;
+                return this.existing;
+            }
+        }
+
+        /** 主线程收到预检结果后交给后台线程 喵 */
+        private void acceptQueryResult(long queryId, boolean accepted, List<String> existing) {
+            synchronized (this.lock) {
+                if (this.phase != Phase.CHECKING || this.queryId != queryId || this.checkArrived) {
+                    return;
+                }
+                this.existing = existing == null ? Set.of() : new HashSet<>(existing);
+                this.checkAccepted = accepted;
+                this.checkArrived = true;
+                this.lock.notifyAll();
+            }
+        }
+
+        /** 只流式读一遍文件算 SHA-1（顺手检查 OggS 头），不占内存 喵 */
+        private Scanned scan(Path path) {
             try (InputStream in = Files.newInputStream(path)) {
-                ByteArrayOutputStream out = new ByteArrayOutputStream((int) Math.min(size, 64 * 1024));
                 MessageDigest digest = MessageDigest.getInstance("SHA-1");
                 byte[] buffer = new byte[64 * 1024];
+                byte[] head = new byte[4];
+                int headLength = 0;
                 long read = 0L;
                 int n;
                 while ((n = in.read(buffer)) >= 0) {
@@ -208,7 +299,11 @@ public final class SpeakerUploader {
                     if (n == 0) {
                         continue;
                     }
-                    out.write(buffer, 0, n);
+                    if (headLength < head.length) {
+                        int copy = Math.min(head.length - headLength, n);
+                        System.arraycopy(buffer, 0, head, headLength, copy);
+                        headLength += copy;
+                    }
                     digest.update(buffer, 0, n);
                     read += n;
                     this.currentRead = read;
@@ -217,8 +312,7 @@ public final class SpeakerUploader {
                         return null;
                     }
                 }
-                byte[] bytes = out.toByteArray();
-                if (!isOgg(bytes)) {
+                if (!isOgg(head, headLength)) {
                     error("message.explainstone.import.not_ogg");
                     return null;
                 }
@@ -227,18 +321,7 @@ public final class SpeakerUploader {
                     error("message.explainstone.import.failed");
                     return null;
                 }
-                // 本地缓存也在后台写，播放器不会因为没有本地文件而等主线程 喵
-                AudioSources.saveLocal(sha1, bytes);
-                String label = path.getFileName().toString();
-                if (label.toLowerCase().endsWith(".ogg")) {
-                    label = label.substring(0, label.length() - 4);
-                }
-                int total = (bytes.length + SpeakerPayloads.CHUNK_SIZE - 1) / SpeakerPayloads.CHUNK_SIZE;
-                if (total <= 0) {
-                    error("message.explainstone.import.read_failed", "empty file");
-                    return null;
-                }
-                return new Prepared(label, sha1, bytes, total);
+                return new Scanned(labelOf(path), sha1, path, read);
             } catch (IOException e) {
                 error("message.explainstone.import.read_failed", String.valueOf(e.getMessage()));
                 LOGGER.warn("读取导入文件失败: {}", path, e);
@@ -247,6 +330,86 @@ public final class SpeakerUploader {
                 error("message.explainstone.import.failed");
                 LOGGER.warn("处理导入文件失败: {}", path, e);
                 return null;
+            }
+        }
+
+        /** 真正上传前再读一遍文件并核对 SHA-1，防止预检之后文件被改 喵 */
+        private byte[] readVerified(Scanned item) {
+            try {
+                byte[] bytes = Files.readAllBytes(item.path());
+                if (bytes.length > ExplainstoneConfig.maxAudioFileBytes()) {
+                    error("message.explainstone.import.too_large", ExplainstoneConfig.maxAudioFileMb());
+                    return null;
+                }
+                if (!isOgg(bytes)) {
+                    error("message.explainstone.import.not_ogg");
+                    return null;
+                }
+                String sha1 = sha1Hex(MessageDigest.getInstance("SHA-1").digest(bytes));
+                if (!sha1.equals(item.sha1())) {
+                    error("message.explainstone.import.read_failed", "file changed");
+                    return null;
+                }
+                return bytes;
+            } catch (IOException e) {
+                error("message.explainstone.import.read_failed", String.valueOf(e.getMessage()));
+                LOGGER.warn("读取导入文件失败: {}", item.path(), e);
+                return null;
+            } catch (Exception e) {
+                error("message.explainstone.import.failed");
+                LOGGER.warn("处理导入文件失败: {}", item.path(), e);
+                return null;
+            }
+        }
+
+        /** 服务端已经有的音频只写本地缓存，播放器才能直接播 喵 */
+        private void cacheLocal(Scanned item) {
+            byte[] bytes = this.readVerified(item);
+            if (bytes != null) {
+                AudioSources.saveLocal(item.sha1(), bytes);
+            }
+        }
+
+        /** 读文件 → 本地缓存 → 分块上传，主线程每 tick 发一部分 喵 */
+        private void upload(Scanned item) {
+            byte[] bytes = this.readVerified(item);
+            if (bytes == null) {
+                this.uploadedBytes += item.size();
+                return;
+            }
+            // 本地缓存也在后台写，播放器不会因为没有本地文件而等主线程 喵
+            AudioSources.saveLocal(item.sha1(), bytes);
+            int total = (bytes.length + SpeakerPayloads.CHUNK_SIZE - 1) / SpeakerPayloads.CHUNK_SIZE;
+            if (total <= 0) {
+                error("message.explainstone.import.read_failed", "empty file");
+                this.uploadedBytes += item.size();
+                return;
+            }
+            Prepared prepared = new Prepared(item.label(), item.sha1(), bytes, total);
+            synchronized (this.lock) {
+                if (this.cancelled) {
+                    return;
+                }
+                this.current = prepared;
+                this.sentChunks = 0;
+                this.currentUploadedBytes = 0L;
+                this.currentUploaded = false;
+                this.phase = Phase.UPLOADING;
+                this.lock.notifyAll();
+                while (!this.currentUploaded && !this.cancelled) {
+                    try {
+                        this.lock.wait();
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        this.cancelled = true;
+                    }
+                }
+                this.current = null;
+                if (this.cancelled) {
+                    return;
+                }
+                this.uploadedBytes += prepared.bytes.length;
+                this.currentUploadedBytes = 0L;
             }
         }
 
@@ -260,6 +423,20 @@ public final class SpeakerUploader {
                 return true;
             }
             synchronized (this.lock) {
+                if (this.phase == Phase.CHECKING) {
+                    // 预检包只能在主线程发；后台线程现在正等在 checkWithServer 里 喵
+                    if (!this.querySent && this.query != null) {
+                        try {
+                            SpeakerNetworking.CHANNEL.sendToServer(this.query);
+                            this.querySent = true;
+                        } catch (Throwable t) {
+                            LOGGER.warn("发送音频预检请求失败: {}", t.toString());
+                            this.cancel();
+                            return true;
+                        }
+                    }
+                    return false;
+                }
                 if (this.phase != Phase.UPLOADING || this.current == null) {
                     return false;
                 }
@@ -292,9 +469,12 @@ public final class SpeakerUploader {
 
         private Status status() {
             long total = Math.max(1L, this.totalBytes);
-            long done = this.phase == Phase.UPLOADING
-                    ? this.uploadedBytes + this.currentUploadedBytes
-                    : this.processedBytes + this.currentRead;
+            long done;
+            switch (this.phase) {
+                case UPLOADING -> done = this.uploadedBytes + this.currentUploadedBytes;
+                case CHECKING -> done = this.totalBytes;
+                default -> done = this.processedBytes + this.currentRead;
+            }
             int percent = (int) Math.max(0L, Math.min(100L, done * 100L / total));
             return new Status(this.phase, percent);
         }
@@ -303,6 +483,7 @@ public final class SpeakerUploader {
             this.cancelled = true;
             synchronized (this.lock) {
                 this.current = null;
+                this.query = null;
                 this.lock.notifyAll();
             }
         }
@@ -328,6 +509,22 @@ public final class SpeakerUploader {
                     && bytes[2] == 'g' && bytes[3] == 'S';
         }
 
+        private static boolean isOgg(byte[] head, int length) {
+            return length >= 4 && head[0] == 'O' && head[1] == 'g' && head[2] == 'g' && head[3] == 'S';
+        }
+
+        /** 文件名去掉 .ogg 当曲目名，并限制网络包里的长度 喵 */
+        private static String labelOf(Path path) {
+            String label = path.getFileName().toString();
+            if (label.toLowerCase().endsWith(".ogg")) {
+                label = label.substring(0, label.length() - 4);
+            }
+            if (label.length() > SpeakerPayloads.MAX_LABEL_LENGTH) {
+                label = label.substring(0, SpeakerPayloads.MAX_LABEL_LENGTH);
+            }
+            return label.isEmpty() ? "audio" : label;
+        }
+
         private static String sha1Hex(byte[] hash) {
             StringBuilder sb = new StringBuilder(hash.length * 2);
             for (byte b : hash) {
@@ -339,6 +536,10 @@ public final class SpeakerUploader {
     }
 
     private record Prepared(String label, String sha1, byte[] bytes, int totalChunks) {
+    }
+
+    /** 预检阶段只记住这些信息，等确认需要上传再读一遍文件 喵 */
+    private record Scanned(String label, String sha1, Path path, long size) {
     }
 }
 

@@ -540,10 +540,15 @@ public class SpeakerScreen extends Screen {
                 : SpeakerAudio.progress(this.pos);
         SpeakerUploader.Status upload = SpeakerUploader.status(this.pos);
         if (upload != null) {
-            String key = upload.phase() == SpeakerUploader.Phase.UPLOADING
-                    ? "screen.explainstone.upload.uploading"
-                    : "screen.explainstone.upload.processing";
-            String status = Component.translatable(key, upload.percent()).getString();
+            String status;
+            if (upload.phase() == SpeakerUploader.Phase.CHECKING) {
+                status = Component.translatable("screen.explainstone.upload.checking").getString();
+            } else {
+                String key = upload.phase() == SpeakerUploader.Phase.UPLOADING
+                        ? "screen.explainstone.upload.uploading"
+                        : "screen.explainstone.upload.processing";
+                status = Component.translatable(key, upload.percent()).getString();
+            }
             context.drawString(this.font, ellipsize(status, this.panelW),
                     this.left, this.hintY, 0xFFD37A, true);
         } else if (this.hintY >= this.listTop + ROW_H) {

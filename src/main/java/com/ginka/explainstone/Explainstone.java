@@ -12,6 +12,7 @@
  */
 package com.ginka.explainstone;
 
+import com.ginka.explainstone.speaker.AudioUsageRegistry;
 import com.ginka.explainstone.speaker.BroadcastRegistry;
 import com.ginka.explainstone.speaker.PlaybackRegistry;
 import com.ginka.explainstone.speaker.SpeakerNetworking;
@@ -22,6 +23,7 @@ import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.common.MinecraftForge;
 import net.minecraftforge.event.BuildCreativeModeTabContentsEvent;
 import net.minecraftforge.event.entity.player.PlayerEvent;
+import net.minecraftforge.event.server.ServerAboutToStartEvent;
 import net.minecraftforge.event.server.ServerStoppedEvent;
 import net.minecraftforge.event.TickEvent;
 import net.minecraftforge.eventbus.api.IEventBus;
@@ -79,10 +81,18 @@ public class Explainstone {
 	}
 
 	@SubscribeEvent
+	public void onServerAboutToStart(ServerAboutToStartEvent event) {
+		// 世界加载前先读「音频 → 音响」引用表，区块加载时再补登记 喵
+		AudioUsageRegistry.load(event.getServer());
+	}
+
+	@SubscribeEvent
 	public void onServerStopped(ServerStoppedEvent event) {
 		PlaybackRegistry.clear();
 		BroadcastRegistry.clear();
 		SpeakerNetworking.clearUploads();
+		AudioUsageRegistry.save();
+		AudioUsageRegistry.clear();
 	}
 
 	@SubscribeEvent

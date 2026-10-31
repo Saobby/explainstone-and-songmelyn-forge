@@ -15,6 +15,9 @@ package com.ginka.explainstone.speaker;
 import net.minecraft.core.BlockPos;
 import net.minecraft.network.FriendlyByteBuf;
 
+import java.util.ArrayList;
+import java.util.List;
+
 /** 讲解石界面的所有自定义网络包（Forge 1.20.1 的 SimpleChannel 写法） 喵 */
 public final class SpeakerPayloads {
     // 客户端 → 服务端：界面上的各种操作 喵
@@ -42,6 +45,12 @@ public final class SpeakerPayloads {
 
     /** 单次传输的分块大小（远小于包上限） 喵 */
     public static final int CHUNK_SIZE = 8000;
+    /** 一次预检最多带多少个 SHA-1（分批发送，避免包太大） 喵 */
+    public static final int MAX_QUERY_ENTRIES = 512;
+    /** label 在网络上最多传输的长度 喵 */
+    public static final int MAX_LABEL_LENGTH = 128;
+    /** SHA-1 固定 40 位小写十六进制 喵 */
+    public static final int SHA1_LENGTH = 40;
 
     private SpeakerPayloads() {
     }
@@ -73,6 +82,67 @@ public final class SpeakerPayloads {
         public static ImportChunk decode(FriendlyByteBuf buf) {
             return new ImportChunk(buf.readBlockPos(), buf.readUtf(), buf.readUtf(),
                     buf.readVarInt(), buf.readVarInt(), buf.readByteArray());
+        }
+    }
+
+    /** 客户端 → 服务端：上传前先问一句这些音频是不是已经存在（带 label，服务端可直接补进播放列表） 喵 */
+    public record AudioQuery(BlockPos pos, long queryId, List<Entry> entries) {
+        public void encode(FriendlyByteBuf buf) {
+            buf.writeBlockPos(this.pos);
+            buf.writeLong(this.queryId);
+            int size = this.entries == null ? 0 : this.entries.size();
+            buf.writeVarInt(size);
+            for (int i = 0; i < size; i++) {
+                Entry entry = this.entries.get(i);
+                buf.writeUtf(entry.label(), MAX_LABEL_LENGTH);
+                buf.writeUtf(entry.sha1(), SHA1_LENGTH);
+            }
+        }
+
+        public static AudioQuery decode(FriendlyByteBuf buf) {
+            BlockPos pos = buf.readBlockPos();
+            long queryId = buf.readLong();
+            int size = buf.readVarInt();
+            if (size < 0 || size > MAX_QUERY_ENTRIES) {
+                size = 0;
+            }
+            List<Entry> entries = new ArrayList<>(size);
+            for (int i = 0; i < size; i++) {
+                entries.add(new Entry(buf.readUtf(MAX_LABEL_LENGTH), buf.readUtf(SHA1_LENGTH)));
+            }
+            return new AudioQuery(pos, queryId, entries);
+        }
+
+        public record Entry(String label, String sha1) {
+        }
+    }
+
+    /** 服务端 → 客户端：预检结果。existing 里的音频已经有了，不需要再上传 喵 */
+    public record AudioQueryResult(BlockPos pos, long queryId, boolean accepted, List<String> existing) {
+        public void encode(FriendlyByteBuf buf) {
+            buf.writeBlockPos(this.pos);
+            buf.writeLong(this.queryId);
+            buf.writeBoolean(this.accepted);
+            int size = this.existing == null ? 0 : this.existing.size();
+            buf.writeVarInt(size);
+            for (int i = 0; i < size; i++) {
+                buf.writeUtf(this.existing.get(i), SHA1_LENGTH);
+            }
+        }
+
+        public static AudioQueryResult decode(FriendlyByteBuf buf) {
+            BlockPos pos = buf.readBlockPos();
+            long queryId = buf.readLong();
+            boolean accepted = buf.readBoolean();
+            int size = buf.readVarInt();
+            if (size < 0 || size > MAX_QUERY_ENTRIES) {
+                size = 0;
+            }
+            List<String> existing = new ArrayList<>(size);
+            for (int i = 0; i < size; i++) {
+                existing.add(buf.readUtf(SHA1_LENGTH));
+            }
+            return new AudioQueryResult(pos, queryId, accepted, existing);
         }
     }
 
