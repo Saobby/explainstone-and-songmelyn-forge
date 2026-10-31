@@ -23,6 +23,7 @@ import net.minecraftforge.common.MinecraftForge;
 import net.minecraftforge.event.BuildCreativeModeTabContentsEvent;
 import net.minecraftforge.event.entity.player.PlayerEvent;
 import net.minecraftforge.event.server.ServerStoppedEvent;
+import net.minecraftforge.event.TickEvent;
 import net.minecraftforge.eventbus.api.IEventBus;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraftforge.fml.DistExecutor;
@@ -38,6 +39,9 @@ public class Explainstone {
 	public static final String MOD_ID = "explainstone";
 	// 定义日志记录器，方便在控制台看输出喵
 	public static final Logger LOGGER = LoggerFactory.getLogger(MOD_ID);
+
+	/** 每 5 秒清理一次超时的分块上传 喵 */
+	private int uploadCleanupTicker;
 
 	public Explainstone(FMLJavaModLoadingContext context) {
 		IEventBus modEventBus = context.getModEventBus();
@@ -78,6 +82,22 @@ public class Explainstone {
 	public void onServerStopped(ServerStoppedEvent event) {
 		PlaybackRegistry.clear();
 		BroadcastRegistry.clear();
+		SpeakerNetworking.clearUploads();
+	}
+
+	@SubscribeEvent
+	public void onServerTick(TickEvent.ServerTickEvent event) {
+		if (event.phase == TickEvent.Phase.END && ++this.uploadCleanupTicker >= 100) {
+			this.uploadCleanupTicker = 0;
+			SpeakerNetworking.cleanupUploads();
+		}
+	}
+
+	@SubscribeEvent
+	public void onPlayerLogout(PlayerEvent.PlayerLoggedOutEvent event) {
+		if (event.getEntity() instanceof ServerPlayer player) {
+			SpeakerNetworking.removePlayerUploads(player);
+		}
 	}
 
 	@SubscribeEvent

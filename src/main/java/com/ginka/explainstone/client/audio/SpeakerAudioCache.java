@@ -12,26 +12,14 @@
  */
 package com.ginka.explainstone.client.audio;
 
-import com.ginka.explainstone.ExplainstoneConfig;
-import com.ginka.explainstone.speaker.SpeakerNetworking;
 import com.ginka.explainstone.speaker.SpeakerPayloads;
-import net.minecraft.client.Minecraft;
-import net.minecraft.core.BlockPos;
-import net.minecraft.network.chat.Component;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import java.io.ByteArrayOutputStream;
-import java.io.IOException;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.security.MessageDigest;
 import java.util.HashMap;
 import java.util.Map;
 
-/** 客户端音频缓存：接收服务端下发的 ogg，并负责把本地文件上传到存档 喵 */
+/** 客户端音频缓存：接收服务端下发的 ogg 并在下载完成后写入本地缓存 喵 */
 public final class SpeakerAudioCache {
-    private static final Logger LOGGER = LoggerFactory.getLogger("explainstone-audio");
     private static final Map<String, Pending> PENDING = new HashMap<>();
 
     private SpeakerAudioCache() {
@@ -44,72 +32,6 @@ public final class SpeakerAudioCache {
             PENDING.remove(payload.sha1());
             AudioSources.saveLocal(payload.sha1(), pending.bytes());
             SpeakerAudio.onAudioReceived(payload.sha1());
-        }
-    }
-
-    /** 读取本地 ogg 并上传到服务端（服务端存进存档并加入播放列表） 喵 */
-    public static void importFile(Minecraft client, BlockPos pos, Path path) {
-        if (client.getConnection() == null) {
-            return;
-        }
-        try {
-            long size = Files.size(path);
-            if (size <= 0 || size > ExplainstoneConfig.maxAudioFileBytes()) {
-                message(client, Component.translatable("message.explainstone.import.too_large",
-                        ExplainstoneConfig.maxAudioFileMb()));
-                return;
-            }
-            byte[] bytes = Files.readAllBytes(path);
-            if (!isOgg(bytes)) {
-                message(client, Component.translatable("message.explainstone.import.not_ogg"));
-                return;
-            }
-            String sha1 = sha1(bytes);
-            String label = path.getFileName().toString();
-            if (label.toLowerCase().endsWith(".ogg")) {
-                label = label.substring(0, label.length() - 4);
-            }
-            // 先放本地缓存，自己立刻能听 喵
-            AudioSources.saveLocal(sha1, bytes);
-
-            int total = (bytes.length + SpeakerPayloads.CHUNK_SIZE - 1) / SpeakerPayloads.CHUNK_SIZE;
-            for (int i = 0; i < total; i++) {
-                int from = i * SpeakerPayloads.CHUNK_SIZE;
-                int len = Math.min(SpeakerPayloads.CHUNK_SIZE, bytes.length - from);
-                byte[] part = new byte[len];
-                System.arraycopy(bytes, from, part, 0, len);
-                SpeakerNetworking.CHANNEL.sendToServer(
-                        new SpeakerPayloads.ImportChunk(pos, label, sha1, i, total, part));
-            }
-            message(client, Component.translatable("message.explainstone.import.ok", label));
-        } catch (IOException e) {
-            message(client, Component.translatable("message.explainstone.import.read_failed", String.valueOf(e.getMessage())));
-            LOGGER.warn("导入音频失败", e);
-        }
-    }
-
-    private static boolean isOgg(byte[] bytes) {
-        return bytes.length > 4 && bytes[0] == 'O' && bytes[1] == 'g' && bytes[2] == 'g' && bytes[3] == 'S';
-    }
-
-    private static String sha1(byte[] bytes) {
-        try {
-            MessageDigest digest = MessageDigest.getInstance("SHA-1");
-            byte[] hash = digest.digest(bytes);
-            StringBuilder sb = new StringBuilder(hash.length * 2);
-            for (byte b : hash) {
-                sb.append(Character.forDigit((b >> 4) & 0xF, 16));
-                sb.append(Character.forDigit(b & 0xF, 16));
-            }
-            return sb.toString();
-        } catch (Exception e) {
-            return Integer.toHexString(bytes.length);
-        }
-    }
-
-    private static void message(Minecraft client, Component text) {
-        if (client.player != null) {
-            client.player.displayClientMessage(text, false);
         }
     }
 

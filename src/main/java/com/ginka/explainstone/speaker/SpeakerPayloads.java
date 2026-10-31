@@ -37,6 +37,8 @@ public final class SpeakerPayloads {
     public static final int ACTION_SET_TRANSMIT_RANGE = 11;
     /** 设置本机音量（value = 0..100，同时决定可闻范围） 喵 */
     public static final int ACTION_SET_VOLUME = 13;
+    /** 清空播放列表 喵 */
+    public static final int ACTION_REMOVE_ALL = 14;
 
     /** 单次传输的分块大小（远小于包上限） 喵 */
     public static final int CHUNK_SIZE = 8000;

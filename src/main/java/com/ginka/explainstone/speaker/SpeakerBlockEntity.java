@@ -103,6 +103,15 @@ public class SpeakerBlockEntity extends BlockEntity {
         }
     }
 
+    /** 清空整个播放列表 喵 */
+    public void clearTracks() {
+        if (!this.tracks.isEmpty()) {
+            this.tracks.clear();
+            this.selected = 0;
+            this.sync();
+        }
+    }
+
     public int indexOf(Track track) {
         return this.tracks.indexOf(track);
     }

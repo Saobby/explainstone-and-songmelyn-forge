@@ -9,7 +9,14 @@ Port of the Fabric 1.21.1 edition of **Explainstone / Songmelyn / Broadcast Tran
   (`<world>/explainstone/audio/<sha1>.ogg`), then streamed to nearby clients on demand.
   Only the current track and the next track in the playlist are fetched: entering a
   speaker's range no longer downloads the whole playlist up front.
+* Client-side imports run asynchronously: reading, SHA-1 hashing and the local cache write
+  happen off the render thread, and chunks are sent over multiple client ticks. The block
+  UI shows a local-only "Processing %" / "Uploading %" status.
 * Import limits are configurable: 10 MB / 10 minutes / 500 tracks per playlist by default.
+  The server also re-checks the SHA-1, enforces interaction distance, assembles chunks by
+  index and expires abandoned partial uploads.
+* The screen includes delete-all, current-track display and a separate progress row so the
+  time/progress text no longer overlaps the playlist.
 * Client-side OpenAL playback engine, independent of resource packs.
 * Directional playback: decoded audio is mono-downmixed and positioned in the world,
   so the stereo image follows where the speaker actually is (turn around and left/right swap).
@@ -83,8 +90,10 @@ maxPlaylistTracks = 500
 ```
 
 Keep the three import-limit values identical on the client and the server: the client
-checks file size before uploading, and the server enforces size, duration and playlist
-length when the upload is assembled.
+checks file size while preparing an upload, and the server enforces size, SHA-1, duration
+and playlist length when the upload is assembled. Incomplete multi-chunk uploads are
+dropped after two minutes without a new chunk, when the player logs out, or when the
+server stops.
 
 ## Differences from the Fabric edition
 

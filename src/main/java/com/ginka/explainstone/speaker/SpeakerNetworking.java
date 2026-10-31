@@ -37,7 +37,9 @@ import java.io.IOException;
 import java.io.RandomAccessFile;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.security.MessageDigest;
 import java.util.HashMap;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -53,9 +55,11 @@ public final class SpeakerNetworking {
     /** 界面操作的最大有效距离（格） 喵 */
     private static final double MAX_INTERACT_DISTANCE_SQ = 64 * 64;
 
-    private static final Map<String, ByteArrayOutputStream> UPLOADS = new HashMap<>();
+    private static final Map<String, Upload> UPLOADS = new HashMap<>();
     /** 服务端时长缓存：sha1 → 秒；避免每次建会话都重新解析文件 喵 */
     private static final Map<String, Integer> DURATION_CACHE = new HashMap<>();
+    /** 分块上传超过这个时间没有新块就丢弃，防止半截上传一直占内存 喵 */
+    private static final long UPLOAD_TIMEOUT_MS = 120_000L;
 
     public static SimpleChannel CHANNEL;
 
@@ -103,6 +107,32 @@ public final class SpeakerNetworking {
             return;
         }
         CHANNEL.send(PacketDistributor.PLAYER.with(() -> player), message);
+    }
+
+    /** 定期清掉长时间没有新分块的上传，避免断线/卡住的上传永久占用内存 喵 */
+    public static void cleanupUploads() {
+        long now = System.currentTimeMillis();
+        Iterator<Map.Entry<String, Upload>> it = UPLOADS.entrySet().iterator();
+        while (it.hasNext()) {
+            Upload upload = it.next().getValue();
+            if (now - upload.lastActivity > UPLOAD_TIMEOUT_MS) {
+                it.remove();
+            }
+        }
+    }
+
+    /** 玩家退出时丢弃该玩家所有未完成的上传 喵 */
+    public static void removePlayerUploads(ServerPlayer player) {
+        if (player == null) {
+            return;
+        }
+        String prefix = player.getUUID() + "/";
+        UPLOADS.keySet().removeIf(key -> key.startsWith(prefix));
+    }
+
+    /** 服务端停止时清空上传缓存 喵 */
+    public static void clearUploads() {
+        UPLOADS.clear();
     }
 
     // ------------------------------------------------------------ 音频库路径 喵
@@ -208,6 +238,7 @@ public final class SpeakerNetworking {
             case SpeakerPayloads.ACTION_TOGGLE_REDSTONE -> be.setRespectRedstone(!be.isRespectRedstone());
             case SpeakerPayloads.ACTION_SELECT -> be.setSelected(payload.value());
             case SpeakerPayloads.ACTION_REMOVE_TRACK -> be.removeTrack(payload.value());
+            case SpeakerPayloads.ACTION_REMOVE_ALL -> be.clearTracks();
             default -> {
             }
         }
@@ -237,24 +268,57 @@ public final class SpeakerNetworking {
         if (player == null || !(player.level() instanceof ServerLevel level)) {
             return;
         }
+        // 和界面操作一样限制交互距离，防止客户端伪造坐标往远处方块上传文件 喵
+        if (player.blockPosition().distSqr(payload.pos()) > MAX_INTERACT_DISTANCE_SQ) {
+            return;
+        }
+        if (!isValidSha1(payload.sha1())) {
+            player.displayClientMessage(Component.translatable("message.explainstone.import.failed"), false);
+            return;
+        }
         if (payload.total() <= 0 || payload.index() < 0 || payload.index() >= payload.total()) {
             return;
         }
-        String key = player.getUUID() + "/" + payload.sha1();
-        ByteArrayOutputStream buffer = UPLOADS.computeIfAbsent(key, k -> new ByteArrayOutputStream());
-        buffer.writeBytes(payload.data());
-        if (buffer.size() > ExplainstoneConfig.maxAudioFileBytes()) {
+        long maxBytes = ExplainstoneConfig.maxAudioFileBytes();
+        long maxChunks = (maxBytes + SpeakerPayloads.CHUNK_SIZE - 1L) / SpeakerPayloads.CHUNK_SIZE;
+        if (payload.total() > maxChunks) {
+            player.displayClientMessage(Component.translatable("message.explainstone.import.too_large",
+                    ExplainstoneConfig.maxAudioFileMb()), false);
+            return;
+        }
+        byte[] part = payload.data();
+        if (part == null || part.length > SpeakerPayloads.CHUNK_SIZE) {
+            return;
+        }
+
+        String key = player.getUUID() + "/" + payload.pos().toShortString() + "/" + payload.sha1();
+        Upload upload = UPLOADS.get(key);
+        if (upload == null || upload.total != payload.total()) {
+            UPLOADS.remove(key);
+            upload = new Upload(payload.total());
+            UPLOADS.put(key, upload);
+        }
+        // 按 index 放进数组，不依赖到达顺序；重复块直接忽略 喵
+        if (!upload.put(payload.index(), part)) {
+            return;
+        }
+        if (upload.size > maxBytes) {
             UPLOADS.remove(key);
             player.displayClientMessage(Component.translatable("message.explainstone.import.too_large",
                     ExplainstoneConfig.maxAudioFileMb()), false);
             return;
         }
-        if (payload.index() + 1 < payload.total()) {
+        if (!upload.complete()) {
             return;
         }
 
         UPLOADS.remove(key);
-        byte[] bytes = buffer.toByteArray();
+        byte[] bytes = upload.assemble();
+        // 服务端重新计算 SHA-1，不能信任客户端声明的文件名 喵
+        if (!sha1Hex(bytes).equals(payload.sha1())) {
+            player.displayClientMessage(Component.translatable("message.explainstone.import.sha_mismatch"), false);
+            return;
+        }
         if (!isOgg(bytes)) {
             player.displayClientMessage(Component.translatable("message.explainstone.import.not_ogg"), false);
             return;
@@ -267,8 +331,13 @@ public final class SpeakerNetworking {
         }
 
         SpeakerBlockEntity target = level.getBlockEntity(payload.pos()) instanceof SpeakerBlockEntity be ? be : null;
-        Track track = Track.file(payload.label(), payload.sha1());
-        if (target != null && !target.getTracks().contains(track)
+        if (target == null) {
+            player.displayClientMessage(Component.translatable("message.explainstone.import.failed"), false);
+            return;
+        }
+        String label = sanitizeLabel(payload.label());
+        Track track = Track.file(label, payload.sha1());
+        if (!target.getTracks().contains(track)
                 && target.getTracks().size() >= ExplainstoneConfig.maxPlaylistTracks()) {
             player.displayClientMessage(Component.translatable("message.explainstone.import.playlist_full",
                     ExplainstoneConfig.maxPlaylistTracks()), false);
@@ -287,14 +356,52 @@ public final class SpeakerNetworking {
             DURATION_CACHE.put(payload.sha1(), seconds);
         }
 
-        if (target != null) {
-            if (!target.getTracks().contains(track) && target.addTrack(track) < 0) {
-                player.displayClientMessage(Component.translatable("message.explainstone.import.playlist_full",
-                        ExplainstoneConfig.maxPlaylistTracks()), false);
-                return;
+        if (!target.getTracks().contains(track) && target.addTrack(track) < 0) {
+            player.displayClientMessage(Component.translatable("message.explainstone.import.playlist_full",
+                    ExplainstoneConfig.maxPlaylistTracks()), false);
+            return;
+        }
+        player.displayClientMessage(Component.translatable("message.explainstone.import.ok", label), true);
+    }
+
+    /** 清除 label 里会破坏播放列表编码的分隔符，并限制长度 喵 */
+    private static String sanitizeLabel(String label) {
+        if (label == null) {
+            return "audio";
+        }
+        String cleaned = label.replace('\u0001', ' ').replace('\u0002', ' ')
+                .replace('\n', ' ').replace('\r', ' ').trim();
+        if (cleaned.length() > 128) {
+            cleaned = cleaned.substring(0, 128);
+        }
+        return cleaned.isEmpty() ? "audio" : cleaned;
+    }
+
+    private static boolean isValidSha1(String sha1) {
+        if (sha1 == null || sha1.length() != 40) {
+            return false;
+        }
+        for (int i = 0; i < sha1.length(); i++) {
+            char c = sha1.charAt(i);
+            if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) {
+                return false;
             }
         }
-        player.displayClientMessage(Component.translatable("message.explainstone.import.ok", payload.label()), true);
+        return true;
+    }
+
+    private static String sha1Hex(byte[] bytes) {
+        try {
+            byte[] hash = MessageDigest.getInstance("SHA-1").digest(bytes);
+            StringBuilder sb = new StringBuilder(hash.length * 2);
+            for (byte b : hash) {
+                sb.append(Character.forDigit((b >> 4) & 0xF, 16));
+                sb.append(Character.forDigit(b & 0xF, 16));
+            }
+            return sb.toString();
+        } catch (Exception e) {
+            return "";
+        }
     }
 
     /** 直接解析 ogg 头算时长（采样率 + 末尾页 granule） 喵 */
@@ -423,7 +530,7 @@ public final class SpeakerNetworking {
             return;
         }
         String sha1 = payload.sha1();
-        if (sha1.isEmpty() || sha1.length() > 64) {
+        if (!isValidSha1(sha1)) {
             return;
         }
         Path file = audioDir(player.getServer()).resolve(sha1 + ".ogg");
@@ -441,6 +548,45 @@ public final class SpeakerNetworking {
                 sendToPlayer(player, new SpeakerPayloads.AudioChunk(sha1, sha1, i, total, part));
             }
         } catch (IOException ignored) {
+        }
+    }
+
+    /** 一个按块编号组装中的上传文件；块可以不按顺序到达 喵 */
+    private static final class Upload {
+        private final int total;
+        private final byte[][] chunks;
+        private int received;
+        private long size;
+        private long lastActivity = System.currentTimeMillis();
+
+        private Upload(int total) {
+            this.total = total;
+            this.chunks = new byte[total][];
+        }
+
+        private boolean put(int index, byte[] data) {
+            if (index < 0 || index >= this.chunks.length || this.chunks[index] != null) {
+                return false;
+            }
+            this.chunks[index] = data;
+            this.received++;
+            this.size += data.length;
+            this.lastActivity = System.currentTimeMillis();
+            return true;
+        }
+
+        private boolean complete() {
+            return this.received >= this.total;
+        }
+
+        private byte[] assemble() {
+            ByteArrayOutputStream out = new ByteArrayOutputStream((int) Math.min(Integer.MAX_VALUE, this.size));
+            for (byte[] chunk : this.chunks) {
+                if (chunk != null) {
+                    out.writeBytes(chunk);
+                }
+            }
+            return out.toByteArray();
         }
     }
 }

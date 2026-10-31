@@ -14,6 +14,7 @@ package com.ginka.explainstone.client;
 
 import com.ginka.explainstone.Explainstone;
 import com.ginka.explainstone.client.audio.SpeakerAudio;
+import com.ginka.explainstone.client.audio.SpeakerUploader;
 import net.minecraft.client.Minecraft;
 import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.client.event.ClientPlayerNetworkEvent;
@@ -30,6 +31,7 @@ public final class ClientEventHandlers {
     @SubscribeEvent
     public static void onClientTick(TickEvent.ClientTickEvent event) {
         if (event.phase == TickEvent.Phase.END) {
+            SpeakerUploader.tick(Minecraft.getInstance());
             SpeakerAudio.tick(Minecraft.getInstance());
         }
     }
@@ -38,6 +40,9 @@ public final class ClientEventHandlers {
     @SubscribeEvent
     public static void onLoggingOut(ClientPlayerNetworkEvent.LoggingOut event) {
         // OpenAL / 音源表都在客户端主线程上操作，这里统一切回主线程 喵
-        Minecraft.getInstance().execute(SpeakerAudio::reset);
+        Minecraft.getInstance().execute(() -> {
+            SpeakerUploader.reset();
+            SpeakerAudio.reset();
+        });
     }
 }

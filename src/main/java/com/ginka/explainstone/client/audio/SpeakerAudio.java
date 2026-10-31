@@ -1236,6 +1236,26 @@ public final class SpeakerAudio {
                 : new float[]{(float) located.offsetSeconds(), (float) located.durationSeconds()};
     }
 
+    /** 当前本地播放曲目的显示名；没有会话/时长未知返回 null 喵 */
+    public static String currentTrackLabel(BlockPos pos) {
+        SyncSession session = SESSIONS.get(pos);
+        if (session == null) {
+            return null;
+        }
+        Located located = locate(session.tracks(), session.mode(), session.elapsedTicks(), session.durations());
+        return located == null ? null : located.track().label();
+    }
+
+    /** 当前频道广播曲目的显示名；没有广播返回 null 喵 */
+    public static String broadcastTrackLabel(int channel) {
+        BroadcastInfo info = BROADCASTS.get(channel);
+        if (info == null) {
+            return null;
+        }
+        Located located = locate(info.tracks(), info.mode(), info.elapsedTicks(), info.durations());
+        return located == null ? null : located.track().label();
+    }
+
     /** 服务端推送：某频道开始/停止广播（带播放顺序 + 已播放 tick） 喵 */
     public static void onBroadcast(SpeakerPayloads.Broadcast payload) {
         BroadcastInfo current = BROADCASTS.get(payload.channel());

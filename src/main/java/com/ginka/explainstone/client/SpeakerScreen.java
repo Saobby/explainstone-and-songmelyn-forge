@@ -17,7 +17,7 @@ import com.ginka.explainstone.SongmelynBlock;
 import com.ginka.explainstone.SpeakerBlock;
 import com.ginka.explainstone.client.audio.AudioSources;
 import com.ginka.explainstone.client.audio.SpeakerAudio;
-import com.ginka.explainstone.client.audio.SpeakerAudioCache;
+import com.ginka.explainstone.client.audio.SpeakerUploader;
 import com.ginka.explainstone.client.widget.IntSlider;
 import com.ginka.explainstone.speaker.SpeakerBlockEntity;
 import com.ginka.explainstone.speaker.SpeakerNetworking;
@@ -62,6 +62,9 @@ public class SpeakerScreen extends Screen {
     private int listTop;
     private int listRows;
     private int hintY;
+    private int nowPlayingY;
+    private int progressBarTop;
+    private int progressBarBottom;
     private int row1;
     private int row2;
     private int row3;
@@ -79,6 +82,7 @@ public class SpeakerScreen extends Screen {
     private Button enableButton;
     private Button importButton;
     private Button removeButton;
+    private Button deleteAllButton;
     private Button confirmButton;
     private Button resetButton;
     private EditBox channelField;
@@ -154,7 +158,11 @@ public class SpeakerScreen extends Screen {
         this.row3 = this.row4 - gap;
         this.row2 = this.row3 - gap;
         this.row1 = this.row2 - gap;
-        this.hintY = this.row1 - 12;
+        // 给“当前播放 + 进度条 + 上传状态”留出独立区域，避免盖住曲目列表 喵
+        this.hintY = this.row1 - 46;
+        this.nowPlayingY = this.row1 - 30;
+        this.progressBarTop = this.row1 - 16;
+        this.progressBarBottom = this.row1 - 6;
 
         // ---- 顶部固定 ---- 喵
         this.titleY = 8;
@@ -222,16 +230,25 @@ public class SpeakerScreen extends Screen {
                         b -> send(SpeakerPayloads.ACTION_TOGGLE_ENABLED, 0))
                 .bounds(this.left + half + 4, this.row3, half, BTN_H).build());
 
-        // 导入 / 删除 喵
+        // 导入 / 删除选中 / 删除全部 喵
+        int third = Math.max(60, (this.panelW - 8) / 3);
         this.importButton = this.addRenderableWidget(Button.builder(Component.translatable("screen.explainstone.button.import"),
                         b -> this.onImportClicked())
-                .bounds(this.left, this.row4, half, BTN_H).build());
+                .bounds(this.left, this.row4, third, BTN_H).build());
         this.removeButton = this.addRenderableWidget(Button.builder(Component.translatable("screen.explainstone.button.remove"), b -> {
             SpeakerBlockEntity be = this.speaker();
             if (be != null && be.getSelected() >= 0) {
+                SpeakerUploader.cancel(this.pos);
                 send(SpeakerPayloads.ACTION_REMOVE_TRACK, be.getSelected());
             }
-        }).bounds(this.left + half + 4, this.row4, half, BTN_H).build());
+        }).bounds(this.left + third + 4, this.row4, third, BTN_H).build());
+        this.deleteAllButton = this.addRenderableWidget(Button.builder(Component.translatable("screen.explainstone.button.remove_all"), b -> {
+            SpeakerBlockEntity be = this.speaker();
+            SpeakerUploader.cancel(this.pos);
+            if (be != null && !be.getTracks().isEmpty()) {
+                send(SpeakerPayloads.ACTION_REMOVE_ALL, 0);
+            }
+        }).bounds(this.left + (third + 4) * 2, this.row4, third, BTN_H).build());
 
         // 频率：350.xxx 喵
         SpeakerBlockEntity be = this.speaker();
@@ -501,12 +518,15 @@ public class SpeakerScreen extends Screen {
                 if (index == selected) {
                     context.fill(this.left, y - 1, this.left + this.panelW, y + ROW_H - 2, 0x602E6BE6);
                 }
-                String name = (index + 1) + ". " + (index == selected ? "▶ " : "") + track.label();
+                String prefix = (index + 1) + ". " + (index == selected ? "▶ " : "");
+                String suffix = "";
                 if (track.isFile() && !AudioSources.hasLocal(track)) {
-                    name = name + "  " + Component.translatable("screen.explainstone.list.downloading").getString();
+                    suffix = "  " + Component.translatable("screen.explainstone.list.downloading").getString();
                 }
-                context.drawString(this.font, name, this.left + 4, y, 0xFFFFFF, true);
                 String length = formatTime(AudioSources.durationSeconds(track));
+                int reserved = length == null ? 4 : this.font.width(length) + 6;
+                String name = ellipsize(prefix + track.label() + suffix, this.panelW - 8 - reserved);
+                context.drawString(this.font, name, this.left + 4, y, 0xFFFFFF, true);
                 if (length != null) {
                     context.drawString(this.font, length,
                             this.left + this.panelW - 4 - this.font.width(length), y, 0xB0C8FF, true);
@@ -514,22 +534,42 @@ public class SpeakerScreen extends Screen {
             }
         }
 
-        float[] progress = transmitter
+        boolean useBroadcast = transmitter || receive;
+        float[] progress = useBroadcast
                 ? SpeakerAudio.broadcastProgress(be == null ? 0 : be.getChannel())
                 : SpeakerAudio.progress(this.pos);
-        if (progress != null) {
-            int barTop = this.hintY - 4;
-            int barBottom = this.hintY + 8;
-            context.fill(this.left, barTop, this.left + this.panelW, barBottom, 0x60FFFFFF);
-            int filled = Math.round(this.panelW * Math.max(0f, Math.min(1f, progress[0] / progress[1])));
-            context.fill(this.left, barTop, this.left + filled, barBottom, 0xC06BCB77);
-            context.drawCenteredString(this.font,
-                    timeOrZero((int) progress[0]) + " / " + timeOrZero((int) progress[1]),
-                    this.width / 2, barTop - 10, 0xFFFFFF);
+        SpeakerUploader.Status upload = SpeakerUploader.status(this.pos);
+        if (upload != null) {
+            String key = upload.phase() == SpeakerUploader.Phase.UPLOADING
+                    ? "screen.explainstone.upload.uploading"
+                    : "screen.explainstone.upload.processing";
+            String status = Component.translatable(key, upload.percent()).getString();
+            context.drawString(this.font, ellipsize(status, this.panelW),
+                    this.left, this.hintY, 0xFFD37A, true);
         } else if (this.hintY >= this.listTop + ROW_H) {
             context.drawString(this.font,
                     Component.translatable("screen.explainstone.list.hint", tracks.size()),
                     this.left, this.hintY, 0x909090, true);
+        }
+
+        if (progress != null) {
+            String label = useBroadcast
+                    ? SpeakerAudio.broadcastTrackLabel(be == null ? 0 : be.getChannel())
+                    : SpeakerAudio.currentTrackLabel(this.pos);
+            String time = timeOrZero((int) progress[0]) + " / " + timeOrZero((int) progress[1]);
+            if (label != null) {
+                String nowPlaying = Component.translatable("screen.explainstone.now_playing", label).getString();
+                int available = this.panelW - 8 - this.font.width(time);
+                context.drawString(this.font, ellipsize(nowPlaying, available),
+                        this.left + 4, this.nowPlayingY, 0xFFFFFF, true);
+            }
+            context.drawString(this.font, time,
+                    this.left + this.panelW - 4 - this.font.width(time), this.nowPlayingY, 0xB0C8FF, true);
+            context.fill(this.left, this.progressBarTop, this.left + this.panelW,
+                    this.progressBarBottom, 0x60FFFFFF);
+            int filled = Math.round(this.panelW * Math.max(0f, Math.min(1f, progress[0] / progress[1])));
+            context.fill(this.left, this.progressBarTop, this.left + filled,
+                    this.progressBarBottom, 0xC06BCB77);
         }
 
         if (transmitter || receive) {
@@ -551,6 +591,29 @@ public class SpeakerScreen extends Screen {
             return null;
         }
         return (seconds / 60) + ":" + String.format("%02d", seconds % 60);
+    }
+
+    /** 按像素宽度截断文本，超长时补省略号，避免和右侧时长叠在一起 喵 */
+    private String ellipsize(String text, int maxWidth) {
+        if (text == null || text.isEmpty()) {
+            return "";
+        }
+        if (maxWidth <= 0) {
+            return "...";
+        }
+        if (this.font.width(text) <= maxWidth) {
+            return text;
+        }
+        String dots = "...";
+        int dotWidth = this.font.width(dots);
+        if (maxWidth <= dotWidth) {
+            return dots;
+        }
+        int end = text.length();
+        while (end > 0 && this.font.width(text.substring(0, end)) + dotWidth > maxWidth) {
+            end--;
+        }
+        return text.substring(0, end) + dots;
     }
 
     @Override
@@ -632,17 +695,13 @@ public class SpeakerScreen extends Screen {
             final List<Path> result = List.copyOf(chosen);
             client.execute(() -> {
                 if (!result.isEmpty()) {
-                    for (Path file : result) {
-                        SpeakerAudioCache.importFile(client, this.pos, file);
-                    }
+                    SpeakerUploader.start(client, this.pos, result);
                     return;
                 }
                 List<Path> files = listInbox(inbox);
                 if (!files.isEmpty()) {
-                    for (Path file : files) {
-                        SpeakerAudioCache.importFile(client, this.pos, file);
-                    }
-                    info(client, Component.translatable("message.explainstone.import.inbox", files.size()));
+                    SpeakerUploader.start(client, this.pos, files);
+                    info(client, Component.translatable("message.explainstone.import.queued", files.size()));
                 } else {
                     info(client, Component.translatable("message.explainstone.import.none", inbox.toString()));
                 }
