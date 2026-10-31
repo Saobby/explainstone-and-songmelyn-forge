@@ -589,43 +589,52 @@ public class SpeakerScreen extends Screen {
     private void openFileDialog(Path inbox) {
         Minecraft client = Minecraft.getInstance();
         Thread thread = new Thread(() -> {
-            String chosen = null;
+            List<Path> chosen = new java.util.ArrayList<>();
             boolean failed = false;
             try {
                 java.awt.FileDialog dialog = new java.awt.FileDialog((java.awt.Frame) null, "选择 ogg 音频",
                         java.awt.FileDialog.LOAD);
                 dialog.setDirectory(inbox.toString());
                 dialog.setFilenameFilter((dir, name) -> name.toLowerCase().endsWith(".ogg"));
-                dialog.setMultipleMode(false);
+                dialog.setMultipleMode(true);
                 dialog.setVisible(true);
-                if (dialog.getFile() != null) {
-                    chosen = new File(dialog.getDirectory(), dialog.getFile()).getAbsolutePath();
+                File[] selectedFiles = dialog.getFiles();
+                if (selectedFiles != null) {
+                    for (File file : selectedFiles) {
+                        if (file != null && file.getName().toLowerCase().endsWith(".ogg")) {
+                            chosen.add(file.toPath());
+                        }
+                    }
                 }
                 dialog.dispose();
             } catch (Throwable t) {
                 failed = true;
             }
-            if (chosen == null && failed) {
+            if (chosen.isEmpty() && failed) {
                 try {
-                    final String[] picked = {null};
                     javax.swing.SwingUtilities.invokeAndWait(() -> {
                         javax.swing.JFileChooser chooser = new javax.swing.JFileChooser();
                         chooser.setDialogTitle("选择 ogg 音频");
                         chooser.setFileFilter(new javax.swing.filechooser.FileNameExtensionFilter("Ogg 音频 (*.ogg)", "ogg"));
                         chooser.setCurrentDirectory(inbox.toFile());
-                        if (chooser.showOpenDialog(null) == javax.swing.JFileChooser.APPROVE_OPTION
-                                && chooser.getSelectedFile() != null) {
-                            picked[0] = chooser.getSelectedFile().getAbsolutePath();
+                        chooser.setMultiSelectionEnabled(true);
+                        if (chooser.showOpenDialog(null) == javax.swing.JFileChooser.APPROVE_OPTION) {
+                            for (File file : chooser.getSelectedFiles()) {
+                                if (file != null && file.getName().toLowerCase().endsWith(".ogg")) {
+                                    chosen.add(file.toPath());
+                                }
+                            }
                         }
                     });
-                    chosen = picked[0];
                 } catch (Throwable ignored) {
                 }
             }
-            final String result = chosen;
+            final List<Path> result = List.copyOf(chosen);
             client.execute(() -> {
-                if (result != null) {
-                    SpeakerAudioCache.importFile(client, this.pos, Path.of(result));
+                if (!result.isEmpty()) {
+                    for (Path file : result) {
+                        SpeakerAudioCache.importFile(client, this.pos, file);
+                    }
                     return;
                 }
                 List<Path> files = listInbox(inbox);
@@ -646,7 +655,7 @@ public class SpeakerScreen extends Screen {
     private static List<Path> listInbox(Path inbox) {
         try (Stream<Path> stream = Files.list(inbox)) {
             return stream.filter(p -> p.getFileName().toString().toLowerCase().endsWith(".ogg"))
-                    .limit(8).toList();
+                    .sorted().toList();
         } catch (IOException e) {
             return List.of();
         }
