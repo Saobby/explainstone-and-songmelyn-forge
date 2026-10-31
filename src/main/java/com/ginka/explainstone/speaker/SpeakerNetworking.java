@@ -53,8 +53,8 @@ import java.util.function.Supplier;
  * 音频库位置：&lt;存档&gt;/explainstone/audio/&lt;sha1&gt;.ogg 喵
  */
 public final class SpeakerNetworking {
-    /** 网络协议版本（7：暂停快照 + 播放/暂停 + 播放列表分帧 + 上传前 SHA-1 预检，旧客户端会被安全拒绝） 喵 */
-    private static final String PROTOCOL_VERSION = "7";
+    /** 网络协议版本（8：发信器全局音量 + 音量小包；旧客户端会被安全拒绝） 喵 */
+    private static final String PROTOCOL_VERSION = "8";
     /** 界面操作的最大有效距离（格） 喵 */
     private static final double MAX_INTERACT_DISTANCE_SQ = 64 * 64;
 
@@ -187,6 +187,11 @@ public final class SpeakerNetworking {
         CHANNEL.registerMessage(8, SpeakerPayloads.AudioQueryResult.class,
                 SpeakerPayloads.AudioQueryResult::encode, SpeakerPayloads.AudioQueryResult::decode,
                 SpeakerNetworking::handleQueryResult, Optional.of(NetworkDirection.PLAY_TO_CLIENT));
+
+        // 服务端 → 客户端：发信器全局音量变化（小包，拖滑块时实时生效） 喵
+        CHANNEL.registerMessage(9, SpeakerPayloads.BroadcastVolume.class,
+                SpeakerPayloads.BroadcastVolume::encode, SpeakerPayloads.BroadcastVolume::decode,
+                SpeakerNetworking::handleBroadcastVolume, Optional.of(NetworkDirection.PLAY_TO_CLIENT));
     }
 
     public static void sendToPlayer(ServerPlayer player, Object message) {
@@ -330,6 +335,14 @@ public final class SpeakerNetworking {
         context.setPacketHandled(true);
     }
 
+    private static void handleBroadcastVolume(SpeakerPayloads.BroadcastVolume payload,
+                                              Supplier<NetworkEvent.Context> ctx) {
+        NetworkEvent.Context context = ctx.get();
+        context.enqueueWork(() -> DistExecutor.unsafeRunWhenOn(Dist.CLIENT,
+                () -> () -> com.ginka.explainstone.client.ClientNetworkHandler.handleBroadcastVolume(payload)));
+        context.setPacketHandled(true);
+    }
+
     // ------------------------------------------------------------ 界面操作 喵
     private static void applyAction(ServerPlayer player, SpeakerPayloads.Action payload) {
         if (player == null || !(player.level() instanceof ServerLevel level)) {
@@ -389,6 +402,7 @@ public final class SpeakerNetworking {
             case SpeakerPayloads.ACTION_SET_TIMER -> be.setTimerSeconds(payload.value());
             case SpeakerPayloads.ACTION_SET_TRANSMIT_RANGE -> be.setTransmitRange(payload.value());
             case SpeakerPayloads.ACTION_SET_VOLUME -> be.setVolume(payload.value());
+            case SpeakerPayloads.ACTION_SET_BROADCAST_VOLUME -> be.setBroadcastVolume(payload.value());
             case SpeakerPayloads.ACTION_PLAY_INDEX -> {
                 be.setPaused(false);
                 be.setSelected(payload.value());

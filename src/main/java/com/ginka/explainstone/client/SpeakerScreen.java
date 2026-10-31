@@ -71,6 +71,8 @@ public class SpeakerScreen extends Screen {
     private int row4;
     private int channelY;
     private int sliderY;
+    /** 最底下一行滑块（发信器：全局音量；音响：本机音量）的 y 坐标 喵 */
+    private int volumeSliderY;
 
     private Button tabSelf;
     private Button tabReceive;
@@ -163,6 +165,9 @@ public class SpeakerScreen extends Screen {
 
     @Override
     protected void init() {
+        // 界面重建（改窗口大小）时旧滑块引用要清掉，下面按方块类型重新创建 喵
+        this.rangeSlider = null;
+        this.volumeSlider = null;
         this.panelW = Math.min(PANEL_W, Math.max(220, this.width - 16));
         this.left = (this.width - this.panelW) / 2;
         int half = this.panelW / 2 - 2;
@@ -171,7 +176,9 @@ public class SpeakerScreen extends Screen {
         // ---- 从底部往上排，保证永远放得下（窗口很矮时自动压缩行距）---- 喵
         int gap = this.height < 260 ? 20 : GAP;
         int bottom = this.height - 6;
-        this.sliderY = bottom - BTN_H;
+        // 发信器有两个滑块（信号范围 + 全局音量），音响/颂美铃只有一个本机音量滑块 喵
+        this.volumeSliderY = bottom - BTN_H;
+        this.sliderY = transmitter ? this.volumeSliderY - BTN_H - 4 : this.volumeSliderY;
         this.channelY = this.sliderY - gap;
         this.row4 = this.channelY - gap;
         this.row3 = this.row4 - gap;
@@ -298,14 +305,19 @@ public class SpeakerScreen extends Screen {
             send(SpeakerPayloads.ACTION_SET_CHANNEL, DEFAULT_CHANNEL);
         }).bounds(this.left + 162, this.channelY - 1, 56, BTN_H).build());
 
-        // 滑块：发信器保留信号范围；音响只用音量（音量同时决定可闻范围，0 即静音） 喵
+        // 滑块：发信器上排是信号范围、下排是所有收信音响的全局音量；
+        // 音响/颂美铃只有本机音量（音量同时决定可闻范围，0 即静音） 喵
         if (transmitter) {
-            int value = be == null ? 512 : be.getTransmitRange();
+            int range = be == null ? 512 : be.getTransmitRange();
             this.rangeSlider = this.addRenderableWidget(new IntSlider(this.left, this.sliderY, this.panelW, BTN_H,
-                    Component.translatable("screen.explainstone.slider.range").getString(), 32, 512, value, this::queueRange));
+                    Component.translatable("screen.explainstone.slider.range").getString(), 32, 512, range, this::queueRange));
+            int broadcastVolume = be == null ? 100 : be.getBroadcastVolume();
+            this.volumeSlider = this.addRenderableWidget(new IntSlider(this.left, this.volumeSliderY, this.panelW, BTN_H,
+                    Component.translatable("screen.explainstone.slider.broadcast_volume").getString(), 0, 100,
+                    broadcastVolume, this::queueVolume));
         } else {
             int volume = be == null ? 100 : be.getVolume();
-            this.volumeSlider = this.addRenderableWidget(new IntSlider(this.left, this.sliderY, this.panelW, BTN_H,
+            this.volumeSlider = this.addRenderableWidget(new IntSlider(this.left, this.volumeSliderY, this.panelW, BTN_H,
                     Component.translatable("screen.explainstone.slider.volume").getString(), 0, 100, volume, this::queueVolume));
         }
 
@@ -330,7 +342,10 @@ public class SpeakerScreen extends Screen {
         this.pendingVolumeValue = -1;
         this.awaitingVolumeValue = value;
         this.awaitingVolumeUntil = System.currentTimeMillis() + 1500L;
-        send(SpeakerPayloads.ACTION_SET_VOLUME, value);
+        // 发信器的滑块改的是广播全局音量，其它方块改自己的音量 喵
+        send(this.isTransmitter()
+                ? SpeakerPayloads.ACTION_SET_BROADCAST_VOLUME
+                : SpeakerPayloads.ACTION_SET_VOLUME, value);
     }
 
     private void flushPendingRange() {
@@ -455,7 +470,8 @@ public class SpeakerScreen extends Screen {
         this.flushPendingVolume();
 
         long now = System.currentTimeMillis();
-        int actualVolume = be == null ? 100 : be.getVolume();
+        // 发信器的音量滑块控制的是广播全局音量（乘到每个收信音响上），其它方块是本机音量 喵
+        int actualVolume = be == null ? 100 : (transmitter ? be.getBroadcastVolume() : be.getVolume());
         if (this.awaitingVolumeValue >= 0
                 && (actualVolume == this.awaitingVolumeValue || now > this.awaitingVolumeUntil)) {
             this.awaitingVolumeValue = -1;

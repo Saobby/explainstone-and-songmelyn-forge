@@ -55,6 +55,11 @@ Port of the Fabric 1.21.1 edition of **Explainstone / Songmelyn / Broadcast Tran
   `effective range = audibleRangeAtFullVolume × volume / 100`. Setting it to 0 mutes the
   speaker, so there is no separate sound on/off toggle. Local playback vs. receive mode is
   chosen with the tabs at the top of the screen.
+* The broadcast transmitter has an extra global volume slider next to its signal-range
+  slider. Every receiving speaker plays at `speaker volume × transmitter volume / 100`
+  (and its audible range scales the same way), so one transmitter can turn the whole
+  channel down at once. Live changes are pushed to clients as a tiny dedicated packet,
+  so dragging the slider never re-sends the playlist.
 * Directional attenuation: volume follows the 3D angle between the speaker-to-listener
   vector and the grille direction. Directly in front is loudest; behind is quieter
   (configurable via `rearVolumeFactor`); standing above the speaker is quieter than

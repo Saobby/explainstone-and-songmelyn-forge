@@ -49,6 +49,8 @@ public class SpeakerBlockEntity extends BlockEntity {
     private int transmitRange = 512;
     /** 本机音量百分比 0-100 喵 */
     private int volume = 100;
+    /** 发信器全局音量百分比 0-100：每个收信音响的实际音量 = 本机音量 × 它 喵 */
+    private int broadcastVolume = 100;
     /** 定时播放秒数（0 = 不定时），只对发信器有效 喵 */
     private int timerSeconds;
     /** 定时倒计时（tick），运行时用 喵 */
@@ -242,9 +244,34 @@ public class SpeakerBlockEntity extends BlockEntity {
         this.sync();
     }
 
+    /** 发信器全局音量：乘到所有收信音响自己的音量上 喵 */
+    public int getBroadcastVolume() {
+        return this.broadcastVolume;
+    }
+
+    public void setBroadcastVolume(int volume) {
+        this.broadcastVolume = Math.max(0, Math.min(100, volume));
+        this.sync();
+    }
+
     /** 实际可闻距离 = 配置的满音量范围 × 当前音量 喵 */
     public double getEffectiveAudibleRange() {
         return ExplainstoneConfig.audibleRangeAtFullVolume() * (this.volume / 100.0);
+    }
+
+    /**
+     * 收信时的实际音量 = 本机音量 × 发信器全局音量（两者都是 0-100 的百分比）。
+     * 发信器把音量调小，收听该频道的所有音响一起变轻 喵
+     */
+    public int getEffectiveVolume(int broadcastVolumePercent) {
+        int broadcast = Math.max(0, Math.min(100, broadcastVolumePercent));
+        return (int) Math.round(this.volume * (broadcast / 100.0));
+    }
+
+    /** 收信时的实际可闻距离：和实际音量一起按比例缩放 喵 */
+    public double getEffectiveAudibleRange(int broadcastVolumePercent) {
+        return ExplainstoneConfig.audibleRangeAtFullVolume()
+                * (this.getEffectiveVolume(broadcastVolumePercent) / 100.0);
     }
 
     public int getTimerSeconds() {
@@ -322,6 +349,7 @@ public class SpeakerBlockEntity extends BlockEntity {
         nbt.putInt("ticksLeft", this.ticksLeft);
         nbt.putInt("transmitRange", this.transmitRange);
         nbt.putInt("volume", this.volume);
+        nbt.putInt("broadcastVolume", this.broadcastVolume);
     }
 
     @Override
@@ -372,6 +400,9 @@ public class SpeakerBlockEntity extends BlockEntity {
         }
         if (nbt.contains("volume")) {
             this.volume = Math.max(0, Math.min(100, nbt.getInt("volume")));
+        }
+        if (nbt.contains("broadcastVolume")) {
+            this.broadcastVolume = Math.max(0, Math.min(100, nbt.getInt("broadcastVolume")));
         }
     }
 

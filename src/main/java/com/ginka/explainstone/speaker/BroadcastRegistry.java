@@ -61,6 +61,8 @@ public final class BroadcastRegistry {
         /** 已经切好的曲目分片；列表过大时为 null（不下发） 喵 */
         final List<String> trackParts;
         int range;
+        /** 发信器全局音量（0-100）：收信音响的实际音量 = 本机音量 × 它 喵 */
+        int volume;
         /** 用户暂停：广播时间线冻结，收信端静音但保留进度显示 喵 */
         boolean paused;
         long pausedElapsed;
@@ -68,8 +70,8 @@ public final class BroadcastRegistry {
         long lastSentMs = System.currentTimeMillis();
 
         private Entry(int channel, List<Track> sourceTracks, int selected, PlayMode mode, List<Track> order,
-                      int[] durations, long startGameTime, long revision, int range, List<String> trackParts,
-                      boolean paused, long pausedElapsed) {
+                      int[] durations, long startGameTime, long revision, int range, int volume,
+                      List<String> trackParts, boolean paused, long pausedElapsed) {
             this.channel = channel;
             this.sourceTracks = sourceTracks;
             this.selected = selected;
@@ -79,6 +81,7 @@ public final class BroadcastRegistry {
             this.startGameTime = startGameTime;
             this.revision = revision;
             this.range = range;
+            this.volume = volume;
             this.trackParts = trackParts;
             this.paused = paused;
             this.pausedElapsed = Math.max(0L, pausedElapsed);
@@ -130,9 +133,11 @@ public final class BroadcastRegistry {
         Map<BlockPos, Entry> map = ACTIVE.computeIfAbsent(level.dimension(), k -> new HashMap<>());
         Entry existing = map.get(pos);
         int range = Math.max(32, Math.min(512, be.getTransmitRange()));
+        int volume = Math.max(0, Math.min(100, be.getBroadcastVolume()));
         if (paused) {
             if (existing != null && existing.matches(channel, tracks, mode, selected)) {
                 existing.range = range;
+                updateVolume(level, pos, existing, volume);
                 long nowMs = System.currentTimeMillis();
                 if (existing.pause(level)) {
                     // 暂停快照：收信端静音但保留进度，等到恢复时再继续 喵
@@ -188,7 +193,7 @@ public final class BroadcastRegistry {
             }
             Entry entry = new Entry(channel, tracks, selected, mode, order,
                     SpeakerNetworking.trackDurations(level, order), level.getGameTime() - elapsed,
-                    ++REVISION, range, parts, true, elapsed);
+                    ++REVISION, range, volume, parts, true, elapsed);
             map.put(pos.immutable(), entry);
             LOGGER.info("broadcast session paused pos={} ch={} mode={} order={} elapsed={} rev={}",
                     pos.toShortString(), channel, mode, order.size(), elapsed, entry.revision);
@@ -205,7 +210,11 @@ public final class BroadcastRegistry {
         }
 
         if (existing != null && existing.matches(channel, tracks, mode, selected)) {
+            boolean rangeChanged = existing.range != range;
+            boolean volumeChanged = existing.volume != volume;
             existing.range = range;
+            // 音量变了只发小包，立即生效；整张播放列表仍然按下面的节流重推 喵
+            updateVolume(level, pos, existing, volume);
             if (existing.paused) {
                 // 恢复：沿用暂停时的顺序和位置，客户端重新开始出声 喵
                 existing.resume(level);
@@ -215,6 +224,10 @@ public final class BroadcastRegistry {
                 sendEntry(level, pos, existing);
                 LOGGER.info("broadcast session resumed pos={} ch={} elapsed={} rev={}",
                         pos.toShortString(), channel, elapsed, existing.revision);
+                return;
+            }
+            if (volumeChanged && !rangeChanged) {
+                // 只是全局音量变了：小包已经发出去了，别把整张播放列表重推一遍 喵
                 return;
             }
             // 只是传播距离变了：保留原进度，重新下发一次（但最多 1 秒一次，防止刷操作放大） 喵
@@ -266,7 +279,7 @@ public final class BroadcastRegistry {
             return;
         }
         Entry entry = new Entry(channel, tracks, selected, mode, order,
-                SpeakerNetworking.trackDurations(level, order), startGameTime, ++REVISION, range, parts,
+                SpeakerNetworking.trackDurations(level, order), startGameTime, ++REVISION, range, volume, parts,
                 false, 0L);
         map.put(pos.immutable(), entry);
         LOGGER.info("broadcast session start pos={} ch={} mode={} order={} rev={}",
@@ -337,7 +350,7 @@ public final class BroadcastRegistry {
             for (ServerPlayer player : level.players()) {
                 SpeakerNetworking.sendToPlayer(player, new SpeakerPayloads.Broadcast(
                         entry.channel, 0, false, false, "", new int[0], entry.elapsedTicks(level),
-                        entry.revision, 0, 1));
+                        entry.revision, 0, 1, entry.volume));
             }
         }
         map.clear();
@@ -361,7 +374,23 @@ public final class BroadcastRegistry {
             int[] durations = i == 0 ? entry.durations : new int[0];
             SpeakerNetworking.sendToPlayer(player, new SpeakerPayloads.Broadcast(entry.channel,
                     entry.mode.ordinal(), true, entry.paused, parts.get(i), durations, elapsed,
-                    entry.revision, i, parts.size()));
+                    entry.revision, i, parts.size(), entry.volume));
+        }
+    }
+
+    /**
+     * 全局音量变化：只给信号范围内的玩家推一个几十字节的小包。
+     * 音量滑块是连续拖动的，重推整张播放列表既慢又费带宽，所以单独走这条路 喵
+     */
+    private static void updateVolume(ServerLevel level, BlockPos pos, Entry entry, int volume) {
+        if (entry.volume == volume) {
+            return;
+        }
+        entry.volume = volume;
+        for (ServerPlayer player : level.players()) {
+            if (player.blockPosition().distSqr(pos) <= (double) entry.range * entry.range) {
+                SpeakerNetworking.sendToPlayer(player, new SpeakerPayloads.BroadcastVolume(entry.channel, volume));
+            }
         }
     }
 
@@ -370,7 +399,8 @@ public final class BroadcastRegistry {
         for (ServerPlayer player : level.players()) {
             if (player.blockPosition().distSqr(pos) <= (double) entry.range * entry.range) {
                 SpeakerNetworking.sendToPlayer(player, new SpeakerPayloads.Broadcast(
-                        entry.channel, 0, false, false, "", new int[0], elapsed, entry.revision, 0, 1));
+                        entry.channel, 0, false, false, "", new int[0], elapsed, entry.revision, 0, 1,
+                        entry.volume));
             }
         }
     }

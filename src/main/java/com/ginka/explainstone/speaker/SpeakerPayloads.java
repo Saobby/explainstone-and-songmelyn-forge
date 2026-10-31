@@ -42,6 +42,8 @@ public final class SpeakerPayloads {
     public static final int ACTION_REMOVE_ALL = 14;
     /** 暂停：冻结当前进度，客户端静音但服务端保留恢复点 喵 */
     public static final int ACTION_PAUSE = 15;
+    /** 设置发信器全局音量（value = 0..100，乘到所有收信音响的音量上） 喵 */
+    public static final int ACTION_SET_BROADCAST_VOLUME = 16;
 
     /** 单次传输的分块大小（远小于包上限） 喵 */
     public static final int CHUNK_SIZE = 8000;
@@ -233,10 +235,12 @@ public final class SpeakerPayloads {
 
     /**
      * 服务端 → 客户端：某频道开始/停止广播（信号范围 512 格）。
+     * volume 是发信器的全局音量（0-100），收信音响的实际音量 = 本机音量 × 它。
      * 播放列表过大时会拆成 partCount 帧发送，partIndex 从 0 开始；durations 只在第 0 帧带。 喵
      */
     public record Broadcast(int channel, int mode, boolean active, boolean paused, String tracks,
-                            int[] durations, long elapsedTicks, long revision, int partIndex, int partCount) {
+                            int[] durations, long elapsedTicks, long revision, int partIndex, int partCount,
+                            int volume) {
         public void encode(FriendlyByteBuf buf) {
             buf.writeVarInt(this.channel);
             buf.writeVarInt(this.mode);
@@ -248,12 +252,28 @@ public final class SpeakerPayloads {
             buf.writeLong(this.revision);
             buf.writeVarInt(this.partIndex);
             buf.writeVarInt(this.partCount);
+            buf.writeVarInt(this.volume);
         }
 
         public static Broadcast decode(FriendlyByteBuf buf) {
             return new Broadcast(buf.readVarInt(), buf.readVarInt(), buf.readBoolean(), buf.readBoolean(),
                     buf.readUtf(MAX_PART_CHARS), readDurations(buf), buf.readLong(), buf.readLong(),
-                    buf.readVarInt(), buf.readVarInt());
+                    buf.readVarInt(), buf.readVarInt(), buf.readVarInt());
+        }
+    }
+
+    /**
+     * 服务端 → 客户端：某频道的全局音量变化（发信器音量滑块）。
+     * 单独发一个几十字节的小包，拖滑块时不用把整张播放列表重推一遍 喵
+     */
+    public record BroadcastVolume(int channel, int volume) {
+        public void encode(FriendlyByteBuf buf) {
+            buf.writeVarInt(this.channel);
+            buf.writeVarInt(this.volume);
+        }
+
+        public static BroadcastVolume decode(FriendlyByteBuf buf) {
+            return new BroadcastVolume(buf.readVarInt(), buf.readVarInt());
         }
     }
 

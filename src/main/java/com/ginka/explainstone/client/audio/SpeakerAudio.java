@@ -98,12 +98,19 @@ public final class SpeakerAudio {
 
     private record BroadcastInfo(PlayMode mode, List<Track> tracks, int[] durations,
                                  long elapsedTicksAtReceive, long receivedClock,
-                                 long revision, long lastSeenClock, boolean paused) {
+                                 long revision, long lastSeenClock, boolean paused,
+                                 int volumePercent) {
         private long elapsedTicks() {
             if (this.paused) {
                 return this.elapsedTicksAtReceive;
             }
             return this.elapsedTicksAtReceive + Math.max(0L, clock - this.receivedClock);
+        }
+
+        /** 换音量但不打断时间轴：把当前已播 tick 冻结成新的接收点 喵 */
+        private BroadcastInfo withVolume(int volume) {
+            return new BroadcastInfo(this.mode, this.tracks, this.durations, this.elapsedTicks(),
+                    clock, this.revision, clock, this.paused, volume);
         }
     }
 
@@ -142,6 +149,7 @@ public final class SpeakerAudio {
         int mode;
         long elapsedTicks;
         boolean paused;
+        int volume = 100;
         int[] durations = new int[0];
 
         private PartialPlaylist(long revision, int partCount, long clock) {
@@ -153,7 +161,7 @@ public final class SpeakerAudio {
         }
 
         private boolean put(int index, String part, int[] durations, int mode, long elapsedTicks,
-                            boolean paused, long clock) {
+                            boolean paused, int volume, long clock) {
             if (index < 0 || index >= this.parts.length || this.parts[index] != null) {
                 return false;
             }
@@ -167,6 +175,7 @@ public final class SpeakerAudio {
             this.mode = mode;
             this.elapsedTicks = elapsedTicks;
             this.paused = paused;
+            this.volume = Math.max(0, Math.min(100, volume));
             this.lastUpdateClock = clock;
             return true;
         }
@@ -396,8 +405,11 @@ public final class SpeakerAudio {
                     continue;
                 }
                 active.add(pos);
+                // 实际音量 = 音响自己的音量 × 发信器的全局音量；可闻范围同比缩放 喵
+                int broadcastVolume = info.volumePercent();
                 voice(pos).updateTimeline(info.tracks(), info.durations(), info.mode(), info.elapsedTicks(),
-                        world, ear, master, be.getEffectiveAudibleRange(), be.getVolume(), facing, referenceNanos);
+                        world, ear, master, be.getEffectiveAudibleRange(broadcastVolume),
+                        be.getEffectiveVolume(broadcastVolume), facing, referenceNanos);
                 spawnNotes(world, pos);
             } else {
                 SyncSession session = SESSIONS.get(pos);
@@ -641,11 +653,16 @@ public final class SpeakerAudio {
                             if (!receive && !state.getValue(SpeakerBlock.PLAYING) && !paused) {
                                 continue;
                             }
+                            // 收信音响的可闻范围还要乘上发信器的全局音量，和实际播放保持一致 喵
+                            BroadcastInfo broadcast = receive ? BROADCASTS.get(be.getChannel()) : null;
+                            double effectiveRange = broadcast == null
+                                    ? be.getEffectiveAudibleRange()
+                                    : be.getEffectiveAudibleRange(broadcast.volumePercent());
                             // 暂停会话的服务端发送范围至少 64 格（和界面交互距离一致），
                             // 不能只按听得到的范围扫描，否则 40 格音量下站在 50 格处进度会消失 喵
                             double range = paused
-                                    ? Math.max(64.0, be.getEffectiveAudibleRange())
-                                    : be.getEffectiveAudibleRange();
+                                    ? Math.max(64.0, effectiveRange)
+                                    : effectiveRange;
                             if (range > 0.0 && pos.distSqr(center) <= range * range) {
                                 outSpeakers.add(pos);
                             }
@@ -1554,7 +1571,7 @@ public final class SpeakerAudio {
             PARTIAL_BROADCASTS.put(channel, partial);
         }
         if (!partial.put(partIndex, payload.tracks(), payload.durations(), payload.mode(),
-                payload.elapsedTicks(), payload.paused(), clock)) {
+                payload.elapsedTicks(), payload.paused(), payload.volume(), clock)) {
             return;
         }
         if (partial.totalChars > SpeakerPayloads.MAX_PLAYLIST_CHARS) {
@@ -1567,7 +1584,20 @@ public final class SpeakerAudio {
         PARTIAL_BROADCASTS.remove(channel);
         BROADCASTS.put(channel, new BroadcastInfo(PlayMode.byOrdinal(partial.mode),
                 parseTracks(partial.joined()), partial.durations, partial.elapsedTicks,
-                partial.firstPartClock, partial.revision, clock, partial.paused));
+                partial.firstPartClock, partial.revision, clock, partial.paused, partial.volume));
+    }
+
+    /**
+     * 服务端推送：发信器的全局音量变了（只带一个小包，不重推播放列表）。
+     * 收信音响的实际音量 = 自己的音量 × 这个全局音量，所以这里立即生效。 喵
+     */
+    public static void onBroadcastVolume(int channel, int volume) {
+        int value = Math.max(0, Math.min(100, volume));
+        BroadcastInfo info = BROADCASTS.get(channel);
+        if (info == null || info.volumePercent() == value) {
+            return;
+        }
+        BROADCASTS.put(channel, info.withVolume(value));
     }
 
     /** 服务端推送：某个讲解石本地播放会话开始/停止（可能分多帧） 喵 */
@@ -1608,7 +1638,7 @@ public final class SpeakerAudio {
             PARTIAL_SESSIONS.put(key, partial);
         }
         if (!partial.put(partIndex, payload.tracks(), payload.durations(), payload.mode(),
-                payload.elapsedTicks(), payload.paused(), clock)) {
+                payload.elapsedTicks(), payload.paused(), 100, clock)) {
             return;
         }
         if (partial.totalChars > SpeakerPayloads.MAX_PLAYLIST_CHARS) {

@@ -26,6 +26,11 @@ public final class ClientNetworkHandler {
         SpeakerAudio.onBroadcast(payload);
     }
 
+    /** 发信器全局音量变化（小包，实时生效） 喵 */
+    public static void handleBroadcastVolume(SpeakerPayloads.BroadcastVolume payload) {
+        SpeakerAudio.onBroadcastVolume(payload.channel(), payload.volume());
+    }
+
     public static void handleAudioChunk(SpeakerPayloads.AudioChunk payload) {
         SpeakerAudioCache.onChunk(payload);
     }
