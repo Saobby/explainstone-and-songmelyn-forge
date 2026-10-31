@@ -30,6 +30,7 @@ import net.minecraft.client.gui.components.EditBox;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.core.BlockPos;
 import net.minecraft.network.chat.Component;
+import net.minecraft.world.level.block.state.BlockState;
 import net.minecraftforge.fml.loading.FMLPaths;
 
 import java.io.File;
@@ -129,6 +130,25 @@ public class SpeakerScreen extends Screen {
                 && client.level.getBlockState(this.pos).getBlock() instanceof BroadcastTransmitterBlock;
     }
 
+    /** 同一个按钮：正在播放时是“暂停”，暂停中/已停止时是“播放” 喵 */
+    private void onPlayPauseClicked() {
+        SpeakerBlockEntity be = this.speaker();
+        boolean active = be != null && !be.isPaused() && this.isBlockPlaying(be);
+        send(active ? SpeakerPayloads.ACTION_PAUSE : SpeakerPayloads.ACTION_PLAY, 0);
+    }
+
+    /** 方块状态是否处于“正在播放”（暂停时服务端会把 PLAYING 置 false） 喵 */
+    private boolean isBlockPlaying(SpeakerBlockEntity be) {
+        BlockState state = be.getBlockState();
+        if (state.getBlock() instanceof BroadcastTransmitterBlock) {
+            return state.getValue(BroadcastTransmitterBlock.PLAYING);
+        }
+        if (state.getBlock() instanceof SpeakerBlock) {
+            return state.getValue(SpeakerBlock.PLAYING);
+        }
+        return false;
+    }
+
     @Override
     public Component getTitle() {
         return this.blockName();
@@ -186,9 +206,9 @@ public class SpeakerScreen extends Screen {
             this.refreshLabels();
         }).bounds(this.left + half + 4, tabY, half, 18).build());
 
-        // 播放 / 停止 喵
+        // 播放 / 暂停（同一个按钮切换）+ 停止 喵
         this.playButton = this.addRenderableWidget(Button.builder(Component.translatable("screen.explainstone.button.play"),
-                        b -> send(SpeakerPayloads.ACTION_PLAY, 0))
+                        b -> this.onPlayPauseClicked())
                 .bounds(this.left, this.row1, half, BTN_H).build());
         this.stopButton = this.addRenderableWidget(Button.builder(Component.translatable("screen.explainstone.button.stop"),
                         b -> send(SpeakerPayloads.ACTION_STOP, 0))
@@ -397,6 +417,10 @@ public class SpeakerScreen extends Screen {
             this.playModeButton.visible = !receive;
         }
         if (this.playButton != null) {
+            boolean active = be != null && !be.isPaused() && this.isBlockPlaying(be);
+            this.playButton.setMessage(Component.translatable(active
+                    ? "screen.explainstone.button.pause"
+                    : "screen.explainstone.button.play"));
             this.playButton.visible = !receive;
         }
         if (this.stopButton != null) {
@@ -472,9 +496,16 @@ public class SpeakerScreen extends Screen {
                 ? be.getBlockState().getValue(BroadcastTransmitterBlock.PLAYING)
                 : be.getBlockState().getValue(SpeakerBlock.PLAYING));
         boolean receive = !transmitter && be != null && be.isReceiveMode();
+        boolean useBroadcast = transmitter || receive;
+        // 发信器/收信端看的是频道广播是否暂停；本机播放看自己的会话/方块暂停标志 喵
+        boolean paused = be != null && (useBroadcast
+                ? (be.isPaused() || SpeakerAudio.broadcastPaused(be.getChannel()))
+                : (be.isPaused() || SpeakerAudio.sessionPaused(this.pos)));
 
         Component title = this.blockName();
-        if (playing) {
+        if (paused) {
+            title = title.copy().append(Component.translatable("screen.explainstone.paused_state"));
+        } else if (playing) {
             title = title.copy().append(Component.translatable(
                     transmitter ? "screen.explainstone.sending" : "screen.explainstone.playing"));
         }
@@ -520,7 +551,6 @@ public class SpeakerScreen extends Screen {
             }
         }
 
-        boolean useBroadcast = transmitter || receive;
         float[] progress = useBroadcast
                 ? SpeakerAudio.broadcastProgress(be == null ? 0 : be.getChannel())
                 : SpeakerAudio.progress(this.pos);
@@ -550,7 +580,9 @@ public class SpeakerScreen extends Screen {
                     : SpeakerAudio.currentTrackLabel(this.pos);
             String time = timeOrZero((int) progress[0]) + " / " + timeOrZero((int) progress[1]);
             if (label != null) {
-                String nowPlaying = Component.translatable("screen.explainstone.now_playing", label).getString();
+                String nowPlaying = Component.translatable(paused
+                        ? "screen.explainstone.now_playing_paused"
+                        : "screen.explainstone.now_playing", label).getString();
                 int available = this.panelW - 8 - this.font.width(time);
                 context.drawString(this.font, ellipsize(nowPlaying, available),
                         this.left + 4, this.nowPlayingY, 0xFFFFFF, true);

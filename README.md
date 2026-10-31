@@ -40,7 +40,14 @@ Port of the Fabric 1.21.1 edition of **Explainstone / Songmelyn / Broadcast Tran
 * Playback sessions are persisted in `<world>/explainstone/playback.nbt`: the shuffled
   order and the elapsed position are saved every few seconds and on world save, then
   restored when the world is loaded again. Shuffle mode resumes the same random order
-  instead of restarting from the selected track every time.
+  instead of restarting from the selected track every time. A paused session keeps its
+  frozen position and order in the same file, so it can be resumed after a reload.
+* The play button doubles as a pause button: while something is playing it reads
+  "Pause"; clicking it freezes the current position (clients go silent immediately) while
+  the progress row stays visible with "Paused: <track>" and the title switches to
+  "· paused". Pressing play resumes from exactly that position with the same shuffled
+  order. The separate stop button discards the pause point, so the next play starts from
+  the selected track again.
 * Audio decoding runs on a background thread. The first track of a session is decoded
   asynchronously (the voice starts a moment later instead of freezing the game), and the
   next track is pre-decoded while the current one plays, so track changes do not hitch.

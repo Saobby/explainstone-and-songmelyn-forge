@@ -86,16 +86,23 @@ public final class SpeakerAudio {
      * 这样即使中途离开范围、重进世界，进度也会继续，而不是从 0 开始。 喵
      */
     private record SyncSession(List<Track> tracks, int[] durations, PlayMode mode,
-                               long elapsedTicksAtReceive, long receivedClock, long revision) {
+                               long elapsedTicksAtReceive, long receivedClock, long revision,
+                               boolean paused) {
         private long elapsedTicks() {
+            if (this.paused) {
+                return this.elapsedTicksAtReceive;
+            }
             return this.elapsedTicksAtReceive + Math.max(0L, clock - this.receivedClock);
         }
     }
 
     private record BroadcastInfo(PlayMode mode, List<Track> tracks, int[] durations,
                                  long elapsedTicksAtReceive, long receivedClock,
-                                 long revision, long lastSeenClock) {
+                                 long revision, long lastSeenClock, boolean paused) {
         private long elapsedTicks() {
+            if (this.paused) {
+                return this.elapsedTicksAtReceive;
+            }
             return this.elapsedTicksAtReceive + Math.max(0L, clock - this.receivedClock);
         }
     }
@@ -134,6 +141,7 @@ public final class SpeakerAudio {
         long lastUpdateClock;
         int mode;
         long elapsedTicks;
+        boolean paused;
         int[] durations = new int[0];
 
         private PartialPlaylist(long revision, int partCount, long clock) {
@@ -144,7 +152,8 @@ public final class SpeakerAudio {
             this.lastUpdateClock = clock;
         }
 
-        private boolean put(int index, String part, int[] durations, int mode, long elapsedTicks, long clock) {
+        private boolean put(int index, String part, int[] durations, int mode, long elapsedTicks,
+                            boolean paused, long clock) {
             if (index < 0 || index >= this.parts.length || this.parts[index] != null) {
                 return false;
             }
@@ -157,6 +166,7 @@ public final class SpeakerAudio {
             }
             this.mode = mode;
             this.elapsedTicks = elapsedTicks;
+            this.paused = paused;
             this.lastUpdateClock = clock;
             return true;
         }
@@ -381,20 +391,37 @@ public final class SpeakerAudio {
                     needSync = true;
                     continue;
                 }
+                if (info.paused()) {
+                    // 频道暂停：保留会话给界面进度条，但不让收信音响发声 喵
+                    continue;
+                }
                 active.add(pos);
                 voice(pos).updateTimeline(info.tracks(), info.durations(), info.mode(), info.elapsedTicks(),
                         world, ear, master, be.getEffectiveAudibleRange(), be.getVolume(), facing, referenceNanos);
                 spawnNotes(world, pos);
-            } else if (isPlaying(world, pos)) {
+            } else {
                 SyncSession session = SESSIONS.get(pos);
-                if (session == null || session.tracks().isEmpty()) {
-                    needSync = true;
+                if (session != null && session.paused()) {
+                    // 本机暂停：会话保留（进度条显示冻结位置），不加入 active，下一段会停掉音源 喵
+                    if (!be.isPaused()) {
+                        needSync = true;   // 恢复包还没到，催服务端重发 喵
+                    }
                     continue;
                 }
-                active.add(pos);
-                voice(pos).updateTimeline(session.tracks(), session.durations(), session.mode(), session.elapsedTicks(),
-                        world, ear, master, be.getEffectiveAudibleRange(), be.getVolume(), facing, referenceNanos);
-                spawnNotes(world, pos);
+                if (isPlaying(world, pos)) {
+                    if (session == null || session.tracks().isEmpty()) {
+                        needSync = true;
+                        continue;
+                    }
+                    active.add(pos);
+                    voice(pos).updateTimeline(session.tracks(), session.durations(), session.mode(),
+                            session.elapsedTicks(), world, ear, master, be.getEffectiveAudibleRange(),
+                            be.getVolume(), facing, referenceNanos);
+                    spawnNotes(world, pos);
+                } else if (be.isPaused()) {
+                    // 服务端已经暂停但进度快照还没到（刚进范围/重进存档）：请求 sync 喵
+                    needSync = true;
+                }
             }
         }
 
@@ -409,8 +436,9 @@ public final class SpeakerAudio {
             SpeakerNetworking.CHANNEL.sendToServer(new SpeakerPayloads.Resync());
         }
 
-        // 3.6) 已经停止/被拆掉的方块，清掉本地会话；频道广播 10 秒没更新也清掉 喵
-        SESSIONS.keySet().removeIf(pos -> world.isLoaded(pos) && !isPlaying(world, pos));
+        // 3.6) 已经停止/被拆掉的方块，清掉本地会话；暂停的会话要保留给进度条 喵
+        SESSIONS.entrySet().removeIf(e -> world.isLoaded(e.getKey())
+                && !e.getValue().paused() && !isPlaying(world, e.getKey()));
         BROADCASTS.entrySet().removeIf(e -> clock - e.getValue().lastSeenClock() > 200);
         // 没凑齐的分片缓存 10 秒后丢弃，避免恶意服务端/切维度时一直占内存 喵
         if (clock % 40 == 0) {
@@ -1424,6 +1452,18 @@ public final class SpeakerAudio {
         return AudioSources.durationSeconds(track);
     }
 
+    /** 本地会话是否处于暂停（界面用“已暂停”替换“正在播放”） 喵 */
+    public static boolean sessionPaused(BlockPos pos) {
+        SyncSession session = SESSIONS.get(pos);
+        return session != null && session.paused();
+    }
+
+    /** 频道广播是否处于暂停 喵 */
+    public static boolean broadcastPaused(int channel) {
+        BroadcastInfo info = BROADCASTS.get(channel);
+        return info != null && info.paused();
+    }
+
     /** 播放进度：{已播秒, 总秒}；没有会话/时长未知返回 null 喵 */
     public static float[] progress(BlockPos pos) {
         SyncSession session = SESSIONS.get(pos);
@@ -1505,7 +1545,7 @@ public final class SpeakerAudio {
             PARTIAL_BROADCASTS.put(channel, partial);
         }
         if (!partial.put(partIndex, payload.tracks(), payload.durations(), payload.mode(),
-                payload.elapsedTicks(), clock)) {
+                payload.elapsedTicks(), payload.paused(), clock)) {
             return;
         }
         if (partial.totalChars > SpeakerPayloads.MAX_PLAYLIST_CHARS) {
@@ -1518,7 +1558,7 @@ public final class SpeakerAudio {
         PARTIAL_BROADCASTS.remove(channel);
         BROADCASTS.put(channel, new BroadcastInfo(PlayMode.byOrdinal(partial.mode),
                 parseTracks(partial.joined()), partial.durations, partial.elapsedTicks,
-                partial.firstPartClock, partial.revision, clock));
+                partial.firstPartClock, partial.revision, clock, partial.paused));
     }
 
     /** 服务端推送：某个讲解石本地播放会话开始/停止（可能分多帧） 喵 */
@@ -1559,7 +1599,7 @@ public final class SpeakerAudio {
             PARTIAL_SESSIONS.put(key, partial);
         }
         if (!partial.put(partIndex, payload.tracks(), payload.durations(), payload.mode(),
-                payload.elapsedTicks(), clock)) {
+                payload.elapsedTicks(), payload.paused(), clock)) {
             return;
         }
         if (partial.totalChars > SpeakerPayloads.MAX_PLAYLIST_CHARS) {
@@ -1572,7 +1612,7 @@ public final class SpeakerAudio {
         PARTIAL_SESSIONS.remove(key);
         SESSIONS.put(key, new SyncSession(parseTracks(partial.joined()), partial.durations,
                 PlayMode.byOrdinal(partial.mode), partial.elapsedTicks,
-                partial.firstPartClock, partial.revision));
+                partial.firstPartClock, partial.revision, partial.paused));
     }
 
     private static List<Track> parseTracks(String encoded) {

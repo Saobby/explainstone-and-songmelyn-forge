@@ -53,8 +53,8 @@ import java.util.function.Supplier;
  * 音频库位置：&lt;存档&gt;/explainstone/audio/&lt;sha1&gt;.ogg 喵
  */
 public final class SpeakerNetworking {
-    /** 网络协议版本（5：播放列表分帧 + 上传前 SHA-1 预检，旧客户端会被安全拒绝） 喵 */
-    private static final String PROTOCOL_VERSION = "5";
+    /** 网络协议版本（7：暂停快照 + 播放/暂停 + 播放列表分帧 + 上传前 SHA-1 预检，旧客户端会被安全拒绝） 喵 */
+    private static final String PROTOCOL_VERSION = "7";
     /** 界面操作的最大有效距离（格） 喵 */
     private static final double MAX_INTERACT_DISTANCE_SQ = 64 * 64;
 
@@ -354,20 +354,31 @@ public final class SpeakerNetworking {
             return;
         }
 
+        boolean wasPaused = be.isPaused();
         switch (payload.action()) {
             case SpeakerPayloads.ACTION_PLAY -> {
+                be.setPaused(false);
                 setPlaying(level, pos, true);
-                if (be.getTimerSeconds() > 0) {
+                // 从暂停恢复时不要重置定时，否则剩余时间会重新算 喵
+                if (!wasPaused && be.getTimerSeconds() > 0) {
                     be.startTimer();
                 }
             }
+            case SpeakerPayloads.ACTION_PAUSE -> {
+                // 只冻结进度：保留定时剩余时间，客户端会收到 active=false 而静音 喵
+                be.setPaused(true);
+                setPlaying(level, pos, false);
+            }
             case SpeakerPayloads.ACTION_STOP -> {
+                be.setPaused(false);
                 setPlaying(level, pos, false);
                 be.stopTimer();
             }
             case SpeakerPayloads.ACTION_SET_CHANNEL -> be.setChannel(payload.value());
             case SpeakerPayloads.ACTION_TOGGLE_RECEIVE -> {
                 be.setReceiveMode(!be.isReceiveMode());
+                // 收发模式切换时暂停状态作废：收信模式没有“暂停”，切回自播放也从停止态开始 喵
+                be.setPaused(false);
                 if (be.isReceiveMode()) {
                     // 切到收信就停掉本机自播放：避免标题还显示"播放中"、红石输出也一直亮着 喵
                     setPlaying(level, pos, false);
@@ -379,6 +390,7 @@ public final class SpeakerNetworking {
             case SpeakerPayloads.ACTION_SET_TRANSMIT_RANGE -> be.setTransmitRange(payload.value());
             case SpeakerPayloads.ACTION_SET_VOLUME -> be.setVolume(payload.value());
             case SpeakerPayloads.ACTION_PLAY_INDEX -> {
+                be.setPaused(false);
                 be.setSelected(payload.value());
                 setPlaying(level, pos, true);
             }

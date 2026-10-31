@@ -58,14 +58,13 @@ public final class PlaybackRegistry {
             if (level == null) {
                 continue;
             }
-            long now = level.getGameTime();
             for (Map.Entry<BlockPos, Session> sessionEntry : entry.getValue().entrySet()) {
                 Session session = sessionEntry.getValue();
                 out.add(new PlaybackPersistence.Saved(entry.getKey(), sessionEntry.getKey(), false, 0,
                         session.mode.ordinal(), session.selected,
                         PlaybackPersistence.trackIds(session.sourceTracks),
                         PlaybackPersistence.trackIds(session.order),
-                        Math.max(0L, now - session.startGameTime)));
+                        session.elapsedTicks(level)));
             }
         }
         return out;
@@ -77,14 +76,18 @@ public final class PlaybackRegistry {
         final PlayMode mode;
         final List<Track> order;
         final int[] durations;
-        final long startGameTime;
-        final long revision;
+        long startGameTime;
+        long revision;
         /** 已经切好的曲目分片；列表过大时为 null（不下发） 喵 */
         final List<String> trackParts;
+        /** 用户暂停：保持会话给客户端显示进度，但时间线冻结 喵 */
+        boolean paused;
+        /** 暂停时的已播放 tick；恢复时用它重设 startGameTime 喵 */
+        long pausedElapsed;
         int range;
 
         private Session(List<Track> sourceTracks, int selected, PlayMode mode, List<Track> order,
-                        int[] durations, long startGameTime, long revision) {
+                        int[] durations, long startGameTime, long revision, boolean paused, long pausedElapsed) {
             this.sourceTracks = sourceTracks;
             this.selected = selected;
             this.mode = mode;
@@ -92,6 +95,8 @@ public final class PlaybackRegistry {
             this.durations = durations;
             this.startGameTime = startGameTime;
             this.revision = revision;
+            this.paused = paused;
+            this.pausedElapsed = Math.max(0L, pausedElapsed);
             String encoded = encode(order);
             List<String> parts = null;
             if (encoded.length() > SpeakerPayloads.MAX_PLAYLIST_CHARS) {
@@ -113,7 +118,29 @@ public final class PlaybackRegistry {
         }
 
         private long elapsedTicks(ServerLevel level) {
+            if (this.paused) {
+                return this.pausedElapsed;
+            }
             return Math.max(0L, level.getGameTime() - this.startGameTime);
+        }
+
+        /** 冻结时间线（只记一次，重复暂停不会把进度往后推） 喵 */
+        private boolean pause(ServerLevel level) {
+            if (this.paused) {
+                return false;
+            }
+            this.pausedElapsed = this.elapsedTicks(level);
+            this.paused = true;
+            return true;
+        }
+
+        /** 从暂停位置恢复：把 startGameTime 往前挪，客户端仍得到同一个 elapsed 喵 */
+        private void resume(ServerLevel level) {
+            if (!this.paused) {
+                return;
+            }
+            this.startGameTime = level.getGameTime() - this.pausedElapsed;
+            this.paused = false;
         }
     }
 
@@ -204,24 +231,91 @@ public final class PlaybackRegistry {
 
     public static void ensure(ServerLevel level, BlockPos pos, SpeakerBlockEntity be) {
         BlockState state = level.getBlockState(pos);
-        boolean playing = state.getBlock() instanceof SpeakerBlock
+        List<Track> tracks = be.getTracks();
+        int selected = be.getSelected();
+        boolean receive = be.isReceiveMode();
+        boolean paused = be.isPaused() && !receive && !tracks.isEmpty();
+        boolean playing = !paused && state.getBlock() instanceof SpeakerBlock
                 && state.getValue(SpeakerBlock.PLAYING)
-                && !be.isReceiveMode()
-                && !be.getTracks().isEmpty();
-        if (!playing) {
+                && !receive
+                && !tracks.isEmpty();
+        if (!playing && !paused) {
             stop(level, pos);
             return;
         }
 
-        List<Track> tracks = be.getTracks();
-        int selected = be.getSelected();
         PlayMode mode = be.getMode();
         Map<BlockPos, Session> map = ACTIVE.computeIfAbsent(level.dimension(), k -> new HashMap<>());
         Session existing = map.get(pos);
-        if (existing != null && existing.matches(tracks, mode, selected)) {
-            // 只是音量/距离变了：保留原进度 喵
-            existing.range = Math.max(64, (int) Math.ceil(be.getEffectiveAudibleRange()) + 16);
+        int range = Math.max(64, (int) Math.ceil(be.getEffectiveAudibleRange()) + 16);
+        if (paused) {
+            if (existing != null && existing.matches(tracks, mode, selected)) {
+                existing.range = range;
+                if (!existing.pause(level)) {
+                    // 已经在暂停：进度不再变化，等每 5 秒的重推即可 喵
+                    return;
+                }
+                // 换一个 revision，客户端会把它当成新的暂停快照，保留进度条但不发声 喵
+                existing.revision = ++REVISION;
+                long elapsed = existing.elapsedTicks(level);
+                sendNearby(level, pos, existing);
+                LOGGER.info("playback session paused pos={} elapsed={} rev={}",
+                        pos.toShortString(), elapsed, existing.revision);
+                return;
+            }
+            if (existing != null) {
+                // 暂停期间列表/模式变了：旧进度作废，重建一个停在同一时间的暂停会话 喵
+                map.remove(pos);
+                PlaybackPersistence.discard(level.dimension(), pos);
+                sendStop(level, pos, existing);
+            }
+
+            // 从保存的顺序/进度恢复成暂停状态；对不上就从 0 开始 喵
+            PlaybackPersistence.Saved saved = PlaybackPersistence.claim(level.dimension(), pos);
+            List<Track> order = saved == null ? null : saved.resolveOrder(tracks);
+            if (order != null && !saved.matches(tracks, mode, selected)) {
+                order = null;
+            }
+            long elapsed = order == null ? 0L : Math.max(0L, saved.elapsedTicks());
+            if (order == null) {
+                order = buildOrder(tracks, mode, selected);
+            }
+            if (order.isEmpty()) {
+                stop(level, pos);
+                return;
+            }
+            Session session = new Session(tracks, selected, mode, order,
+                    SpeakerNetworking.trackDurations(level, order), level.getGameTime() - elapsed,
+                    ++REVISION, true, elapsed);
+            session.range = range;
+            map.put(pos.immutable(), session);
+            if (session.trackParts == null) {
+                LOGGER.warn("playback session pos={} 的播放列表太大，暂不下发（减少曲目后会恢复）", pos.toShortString());
+            }
+            LOGGER.info("playback session paused pos={} mode={} order={} elapsed={} rev={}",
+                    pos.toShortString(), mode, order.size(), elapsed, session.revision);
+            sendNearby(level, pos, session);
             return;
+        }
+
+        if (existing != null && existing.matches(tracks, mode, selected)) {
+            existing.range = range;
+            if (existing.paused) {
+                // 从暂停恢复：同一个顺序、同一个已播放位置 喵
+                existing.resume(level);
+                existing.revision = ++REVISION;
+                long elapsed = existing.elapsedTicks(level);
+                sendNearby(level, pos, existing);
+                LOGGER.info("playback session resumed pos={} elapsed={} rev={}",
+                        pos.toShortString(), elapsed, existing.revision);
+            }
+            return;
+        }
+        if (existing != null) {
+            // 列表/模式变了：先让旧会话停下 喵
+            map.remove(pos);
+            PlaybackPersistence.discard(level.dimension(), pos);
+            sendStop(level, pos, existing);
         }
 
         // 重进存档时优先恢复上次保存的随机顺序和进度；对不上就重新生成 喵
@@ -242,8 +336,8 @@ public final class PlaybackRegistry {
             return;
         }
         Session session = new Session(tracks, selected, mode, order,
-                SpeakerNetworking.trackDurations(level, order), startGameTime, ++REVISION);
-        session.range = Math.max(64, (int) Math.ceil(be.getEffectiveAudibleRange()) + 16);
+                SpeakerNetworking.trackDurations(level, order), startGameTime, ++REVISION, false, 0L);
+        session.range = range;
         map.put(pos.immutable(), session);
         if (session.trackParts == null) {
             LOGGER.warn("playback session pos={} 的播放列表太大，暂不下发（减少曲目后会恢复）", pos.toShortString());
@@ -254,6 +348,11 @@ public final class PlaybackRegistry {
             LOGGER.info("playback session resumed pos={} elapsed={} rev={}", pos.toShortString(),
                     level.getGameTime() - startGameTime, session.revision);
         }
+        sendNearby(level, pos, session);
+    }
+
+    /** 把会话（含暂停快照）发给范围内的所有玩家 喵 */
+    private static void sendNearby(ServerLevel level, BlockPos pos, Session session) {
         for (ServerPlayer player : level.players()) {
             if (player.blockPosition().distSqr(pos) <= (double) session.range * session.range) {
                 send(player, pos, session, level);
@@ -273,11 +372,17 @@ public final class PlaybackRegistry {
             return;
         }
         LOGGER.info("playback session stop pos={} rev={}", pos.toShortString(), removed.revision);
-        long elapsed = removed.elapsedTicks(level);
+        sendStop(level, pos, removed);
+    }
+
+    /** 通知附近客户端这个会话结束/暂停（active=false） 喵 */
+    private static void sendStop(ServerLevel level, BlockPos pos, Session session) {
+        long elapsed = session.elapsedTicks(level);
         for (ServerPlayer player : level.players()) {
-            if (player.blockPosition().distSqr(pos) <= (double) removed.range * removed.range) {
+            if (player.blockPosition().distSqr(pos) <= (double) session.range * session.range) {
                 SpeakerNetworking.sendToPlayer(player, new SpeakerPayloads.Playback(pos,
-                        removed.mode.ordinal(), false, "", new int[0], elapsed, removed.revision, 0, 1));
+                        session.mode.ordinal(), false, false, "", new int[0], elapsed,
+                        session.revision, 0, 1));
             }
         }
     }
@@ -305,7 +410,7 @@ public final class PlaybackRegistry {
             // durations 只在第 0 帧带，其他帧留空，避免大列表重复传几十 KB 喵
             int[] durations = i == 0 ? session.durations : new int[0];
             SpeakerNetworking.sendToPlayer(player, new SpeakerPayloads.Playback(pos,
-                    session.mode.ordinal(), true, parts.get(i), durations, elapsed,
+                    session.mode.ordinal(), true, session.paused, parts.get(i), durations, elapsed,
                     session.revision, i, parts.size()));
         }
     }

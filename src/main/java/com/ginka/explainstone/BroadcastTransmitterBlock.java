@@ -92,6 +92,10 @@ public class BroadcastTransmitterBlock extends Block implements EntityBlock {
             if (edge && be.isRespectRedstone() && state.getValue(PLAYING) != powered
                     // 配置要求 OP 才能开播时，红石不能被用来绕过权限（停止广播仍然允许） 喵
                     && !(powered && ExplainstoneConfig.broadcastRequiresOp())) {
+                if (powered) {
+                    // 红石重新开播时清掉用户暂停状态 喵
+                    be.setPaused(false);
+                }
                 level.setBlock(pos, state.setValue(PLAYING, powered), Block.UPDATE_ALL);
                 if (powered) {
                     if (be.getTimerSeconds() > 0) {
@@ -142,8 +146,8 @@ public class BroadcastTransmitterBlock extends Block implements EntityBlock {
             speaker.ensureAudioUsageRegistered();
             BlockState current = w.getBlockState(pos);
             boolean broadcasting = current.getBlock() instanceof BroadcastTransmitterBlock && current.getValue(PLAYING);
-            if (broadcasting && w instanceof ServerLevel serverLevel) {
-                // 每 5 秒重推一次，客户端换了维度/晚进信号范围/漏收包都能自愈 喵
+            if ((broadcasting || speaker.isPaused()) && w instanceof ServerLevel serverLevel) {
+                // 每 5 秒重推一次，客户端换了维度/晚进信号范围/漏收包都能自愈；暂停时也重推冻结进度 喵
                 if (++BEACON_TICK % 100 == 0) {
                     BroadcastRegistry.refresh(serverLevel, pos, speaker);
                 }

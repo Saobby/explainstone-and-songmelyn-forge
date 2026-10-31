@@ -43,6 +43,8 @@ public class SpeakerBlockEntity extends BlockEntity {
     private int channel = 234;
     /** 收信模式：只听广播，不放自己的列表 喵 */
     private boolean receiveMode;
+    /** 用户主动暂停：保留播放位置，但不出声；停止会丢弃暂停点 喵 */
+    private boolean paused;
     /** 发信器信号传播距离（格），32-512 喵 */
     private int transmitRange = 512;
     /** 本机音量百分比 0-100 喵 */
@@ -210,6 +212,18 @@ public class SpeakerBlockEntity extends BlockEntity {
         this.sync();
     }
 
+    public boolean isPaused() {
+        return this.paused;
+    }
+
+    public void setPaused(boolean paused) {
+        if (this.paused == paused) {
+            return;
+        }
+        this.paused = paused;
+        this.sync();
+    }
+
     public int getTransmitRange() {
         return this.transmitRange;
     }
@@ -303,7 +317,9 @@ public class SpeakerBlockEntity extends BlockEntity {
         nbt.putBoolean("lastPowered", this.lastPowered);
         nbt.putInt("channel", this.channel);
         nbt.putBoolean("receiveMode", this.receiveMode);
+        nbt.putBoolean("paused", this.paused);
         nbt.putInt("timerSeconds", this.timerSeconds);
+        nbt.putInt("ticksLeft", this.ticksLeft);
         nbt.putInt("transmitRange", this.transmitRange);
         nbt.putInt("volume", this.volume);
     }
@@ -341,8 +357,15 @@ public class SpeakerBlockEntity extends BlockEntity {
         if (nbt.contains("receiveMode")) {
             this.receiveMode = nbt.getBoolean("receiveMode");
         }
+        if (nbt.contains("paused")) {
+            this.paused = nbt.getBoolean("paused");
+        }
         if (nbt.contains("timerSeconds")) {
             this.timerSeconds = Math.max(0, Math.min(86_400, nbt.getInt("timerSeconds")));
+        }
+        if (nbt.contains("ticksLeft")) {
+            // 暂停/重进存档后定时器接着剩余时间走，不要重新计时 喵
+            this.ticksLeft = Math.max(0, Math.min(1_728_000, nbt.getInt("ticksLeft")));
         }
         if (nbt.contains("transmitRange")) {
             this.transmitRange = Math.max(32, Math.min(512, nbt.getInt("transmitRange")));

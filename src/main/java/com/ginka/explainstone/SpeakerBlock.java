@@ -130,6 +130,10 @@ public class SpeakerBlock extends Block implements EntityBlock {
             boolean edge = powered != be.isLastPowered();
             be.setLastPowered(powered);
             if (edge && be.isRespectRedstone() && state.getValue(PLAYING) != powered) {
+                if (powered) {
+                    // 红石重新开播时清掉用户暂停状态，否则会一直处于暂停 喵
+                    be.setPaused(false);
+                }
                 level.setBlock(pos, state.setValue(PLAYING, powered), Block.UPDATE_ALL);
                 if (level instanceof ServerLevel serverLevel) {
                     if (powered) {

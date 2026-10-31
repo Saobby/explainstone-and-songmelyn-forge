@@ -40,6 +40,8 @@ public final class SpeakerPayloads {
     public static final int ACTION_SET_VOLUME = 13;
     /** 清空播放列表 喵 */
     public static final int ACTION_REMOVE_ALL = 14;
+    /** 暂停：冻结当前进度，客户端静音但服务端保留恢复点 喵 */
+    public static final int ACTION_PAUSE = 15;
 
     /** 单次传输的分块大小（远小于包上限） 喵 */
     public static final int CHUNK_SIZE = 8000;
@@ -233,12 +235,13 @@ public final class SpeakerPayloads {
      * 服务端 → 客户端：某频道开始/停止广播（信号范围 512 格）。
      * 播放列表过大时会拆成 partCount 帧发送，partIndex 从 0 开始；durations 只在第 0 帧带。 喵
      */
-    public record Broadcast(int channel, int mode, boolean active, String tracks, int[] durations,
-                            long elapsedTicks, long revision, int partIndex, int partCount) {
+    public record Broadcast(int channel, int mode, boolean active, boolean paused, String tracks,
+                            int[] durations, long elapsedTicks, long revision, int partIndex, int partCount) {
         public void encode(FriendlyByteBuf buf) {
             buf.writeVarInt(this.channel);
             buf.writeVarInt(this.mode);
             buf.writeBoolean(this.active);
+            buf.writeBoolean(this.paused);
             buf.writeUtf(this.tracks == null ? "" : this.tracks, MAX_PART_CHARS);
             writeDurations(buf, this.durations);
             buf.writeLong(this.elapsedTicks);
@@ -248,7 +251,7 @@ public final class SpeakerPayloads {
         }
 
         public static Broadcast decode(FriendlyByteBuf buf) {
-            return new Broadcast(buf.readVarInt(), buf.readVarInt(), buf.readBoolean(),
+            return new Broadcast(buf.readVarInt(), buf.readVarInt(), buf.readBoolean(), buf.readBoolean(),
                     buf.readUtf(MAX_PART_CHARS), readDurations(buf), buf.readLong(), buf.readLong(),
                     buf.readVarInt(), buf.readVarInt());
         }
@@ -259,12 +262,13 @@ public final class SpeakerPayloads {
      * elapsedTicks 是发包时已经播放的游戏 tick 数，客户端再加本地经过的 tick 即可对齐；
      * 播放列表过大时会拆成 partCount 帧发送，durations 只在第 0 帧带。 喵
      */
-    public record Playback(BlockPos pos, int mode, boolean active, String tracks, int[] durations,
-                           long elapsedTicks, long revision, int partIndex, int partCount) {
+    public record Playback(BlockPos pos, int mode, boolean active, boolean paused, String tracks,
+                           int[] durations, long elapsedTicks, long revision, int partIndex, int partCount) {
         public void encode(FriendlyByteBuf buf) {
             buf.writeBlockPos(this.pos);
             buf.writeVarInt(this.mode);
             buf.writeBoolean(this.active);
+            buf.writeBoolean(this.paused);
             buf.writeUtf(this.tracks == null ? "" : this.tracks, MAX_PART_CHARS);
             writeDurations(buf, this.durations);
             buf.writeLong(this.elapsedTicks);
@@ -274,7 +278,7 @@ public final class SpeakerPayloads {
         }
 
         public static Playback decode(FriendlyByteBuf buf) {
-            return new Playback(buf.readBlockPos(), buf.readVarInt(), buf.readBoolean(),
+            return new Playback(buf.readBlockPos(), buf.readVarInt(), buf.readBoolean(), buf.readBoolean(),
                     buf.readUtf(MAX_PART_CHARS), readDurations(buf), buf.readLong(), buf.readLong(),
                     buf.readVarInt(), buf.readVarInt());
         }
