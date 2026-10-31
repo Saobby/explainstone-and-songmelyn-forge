@@ -54,6 +54,9 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.function.Predicate;
 
 /**
@@ -232,6 +235,16 @@ public final class SpeakerAudio {
         audioPaused = false;
         efxSupported = null;
         warnedNoEfx = false;
+        // 旧 context / 旧世界遗留的解码结果全部作废 喵
+        clearDecodeState();
+    }
+
+    /** 丢弃后台解码任务/结果/失败冷却（换 context 或换世界时） 喵 */
+    private static void clearDecodeState() {
+        DECODE_EPOCH++;
+        DECODE_JOBS.clear();
+        DECODE_RESULTS.clear();
+        DECODE_FAILED_AT.clear();
     }
 
     /** 只丢引用，不对旧 context 的名字做任何 AL 调用 喵 */
@@ -273,6 +286,7 @@ public final class SpeakerAudio {
         VOICES.clear();
         PENDING_STARTS.clear();
         clearBufferCache();
+        clearDecodeState();
         speakers = List.of();
         transmitters = List.of();
         SESSIONS.clear();
@@ -307,6 +321,7 @@ public final class SpeakerAudio {
             usedContext = current;
             LOGGER.info("using Minecraft OpenAL context 0x{}", Long.toHexString(current));
         }
+        processDecodeResults();
         tickSounds(client);
     }
 
@@ -508,6 +523,7 @@ public final class SpeakerAudio {
         VOICES.clear();
         PENDING_STARTS.clear();
         clearBufferCache();
+        clearDecodeState();
         speakers = List.of();
         transmitters = List.of();
         SESSIONS.clear();
@@ -646,7 +662,7 @@ public final class SpeakerAudio {
      * 同一首曲子只解码一次，多个音响共用同一个 OpenAL buffer。
      * 这既省内存，也避免 4 个音响各自解码导致起播时间错开（回声） 喵
      */
-    private static final int MAX_CACHED_BUFFERS = 3;
+    private static final int MAX_CACHED_BUFFERS = 4;
     private static final Map<String, SharedBuffer> BUFFER_CACHE = new LinkedHashMap<>(8, 0.75f, true);
 
     private static final class SharedBuffer {
@@ -660,22 +676,54 @@ public final class SpeakerAudio {
         }
     }
 
-    private static SharedBuffer acquireBuffer(Track track) {
-        SharedBuffer cached = BUFFER_CACHE.get(track.id());
-        if (cached != null) {
-            cached.users++;
-            return cached;
+    /** 后台解码线程：首次起播不在主线程解码整首 Ogg，避免卡顿 喵 */
+    private static final ExecutorService DECODE_EXECUTOR = Executors.newSingleThreadExecutor(runnable -> {
+        Thread thread = new Thread(runnable, "explainstone-audio-decode");
+        thread.setDaemon(true);
+        return thread;
+    });
+    /** 后台解码完成的结果，主线程每 tick 取一个上传到 OpenAL 喵 */
+    private static final ConcurrentLinkedQueue<DecodeResult> DECODE_RESULTS = new ConcurrentLinkedQueue<>();
+    /** 正在解码的曲目 id（只在主线程读写） 喵 */
+    private static final Set<String> DECODE_JOBS = new HashSet<>();
+    /** 解码失败/过大的冷却时间，避免每 tick 重试 喵 */
+    private static final Map<String, Long> DECODE_FAILED_AT = new HashMap<>();
+    private static final int MAX_DECODE_JOBS = 4;
+    private static final long DECODE_RETRY_MS = 10_000L;
+    /** 声音引擎重建时递增：旧 context 下解码出来的结果直接丢弃 喵 */
+    private static volatile long DECODE_EPOCH;
+
+    /** 后台解码结果；pcm == null 表示失败。 喵 */
+    private static final class DecodeResult {
+        final String trackId;
+        final long epoch;
+        final ByteBuffer pcm;
+        final int sampleRate;
+        final double durationSeconds;
+        final boolean tooBig;
+
+        private DecodeResult(String trackId, long epoch, ByteBuffer pcm, int sampleRate,
+                             double durationSeconds, boolean tooBig) {
+            this.trackId = trackId;
+            this.epoch = epoch;
+            this.pcm = pcm;
+            this.sampleRate = sampleRate;
+            this.durationSeconds = durationSeconds;
+            this.tooBig = tooBig;
         }
-        // 没有缓存 → 解码一次并建成共享 buffer 喵
+    }
+
+    /** 纯后台工作：读文件 + Ogg 解码 + 下混，不访问世界/OpenAL 喵 */
+    private static DecodeResult decodeTrack(Track track, long epoch) {
         InputStream stream = AudioSources.open(track);
         if (stream == null) {
-            return null;
+            return new DecodeResult(track.id(), epoch, null, 0, 0.0, false);
         }
         try (OggAudioStream ogg = new OggAudioStream(stream)) {
             javax.sound.sampled.AudioFormat format = ogg.getFormat();
             ByteBuffer pcm = ogg.readAll();
             if (pcm == null || !pcm.hasRemaining()) {
-                return null;
+                return new DecodeResult(track.id(), epoch, null, 0, 0.0, false);
             }
             if (!pcm.isDirect()) {
                 ByteBuffer direct = ByteBuffer.allocateDirect(pcm.remaining());
@@ -691,36 +739,113 @@ public final class SpeakerAudio {
                 channels = 1;
             }
             if (pcm.remaining() > MAX_PCM_BYTES) {
-                LOGGER.warn("音频解码后过大({} MB)，跳过播放: {}",
-                        pcm.remaining() / (1024 * 1024), track.id());
-                if (!warnedTooBig) {
-                    warnedTooBig = true;
-                    Minecraft client = Minecraft.getInstance();
-                    if (client.player != null) {
-                        client.player.displayClientMessage(
-                                Component.translatable("message.explainstone.audio.too_big"), false);
-                    }
-                }
-                return null;
+                return new DecodeResult(track.id(), epoch, pcm, sampleRate, 0.0, true);
             }
             double duration = pcm.remaining() / (2.0 * channels * sampleRate);
-            int buffer = AL10.alGenBuffers();
-            if (buffer == 0) {
-                LOGGER.warn("alGenBuffers 失败: {}", track.id());
-                return null;
-            }
-            // 共享 MC 的 context 后，AL 错误状态可能混入其它线程的错误；
-            // 这里不再用 alGetError 判断（否则会出现假的“上传失败”） 喵
-            AL10.alBufferData(buffer, AL10.AL_FORMAT_MONO16, pcm, sampleRate);
-            SharedBuffer shared = new SharedBuffer(buffer, duration);
-            shared.users = 1;
-            BUFFER_CACHE.put(track.id(), shared);
-            trimBufferCache();
-            return shared;
+            return new DecodeResult(track.id(), epoch, pcm, sampleRate, duration, false);
         } catch (Exception e) {
             LOGGER.warn("解码音频失败 {}: {}", track.id(), e.toString());
-            return null;
+            return new DecodeResult(track.id(), epoch, null, 0, 0.0, false);
         }
+    }
+
+    /** 发起后台解码（同一首只解一次；队列满时让音源下个 tick 再试） 喵 */
+    private static void startDecode(Track track) {
+        String id = track.id();
+        if (BUFFER_CACHE.containsKey(id) || DECODE_JOBS.contains(id)) {
+            return;
+        }
+        // 没有可用的 OpenAL context 时先不解码，避免结果堆着没人上传 喵
+        if (ALC10.alcGetCurrentContext() == 0L) {
+            return;
+        }
+        Long failedAt = DECODE_FAILED_AT.get(id);
+        if (failedAt != null && System.currentTimeMillis() - failedAt < DECODE_RETRY_MS) {
+            return;
+        }
+        if (DECODE_JOBS.size() >= MAX_DECODE_JOBS) {
+            return;
+        }
+        DECODE_JOBS.add(id);
+        long epoch = DECODE_EPOCH;
+        DECODE_EXECUTOR.execute(() -> DECODE_RESULTS.add(decodeTrack(track, epoch)));
+    }
+
+    /** 正在解码 or 解码队列已满：音源应该安静等待，而不是标记为失败 喵 */
+    private static boolean shouldWaitForDecode(Track track) {
+        return DECODE_JOBS.contains(track.id()) || DECODE_JOBS.size() >= MAX_DECODE_JOBS;
+    }
+
+    /** 预解码下一首：真正开始播放时 buffer 已经准备好了 喵 */
+    private static void prefetchBuffer(Track track) {
+        if (track == null) {
+            return;
+        }
+        if (track.isFile() && !AudioSources.hasLocal(track)) {
+            return;
+        }
+        startDecode(track);
+    }
+
+    /** 客户端下载完音频后提前解码：等会话真正开始时 buffer 已经就绪 喵 */
+    public static void prefetchDownloaded(String sha1) {
+        if (sha1 == null || !sha1.matches("[0-9a-f]{40}")) {
+            return;
+        }
+        prefetchBuffer(Track.file(sha1, sha1));
+    }
+
+    /** 主线程每 tick 最多上传一个解码结果，避免一次性 alBufferData 造成尖峰 喵 */
+    private static void processDecodeResults() {
+        DecodeResult result = DECODE_RESULTS.poll();
+        if (result == null) {
+            return;
+        }
+        if (result.epoch != DECODE_EPOCH) {
+            return;   // 旧 context 的结果：直接丢掉（也不能动 DECODE_JOBS 里新的同名任务） 喵
+        }
+        DECODE_JOBS.remove(result.trackId);
+        if (result.tooBig) {
+            LOGGER.warn("音频解码后过大({} MB)，跳过播放: {}",
+                    result.pcm.remaining() / (1024 * 1024), result.trackId);
+            if (!warnedTooBig) {
+                warnedTooBig = true;
+                Minecraft client = Minecraft.getInstance();
+                if (client.player != null) {
+                    client.player.displayClientMessage(
+                            Component.translatable("message.explainstone.audio.too_big"), false);
+                }
+            }
+            DECODE_FAILED_AT.put(result.trackId, System.currentTimeMillis());
+            return;
+        }
+        if (result.pcm == null || !result.pcm.hasRemaining()) {
+            DECODE_FAILED_AT.put(result.trackId, System.currentTimeMillis());
+            return;
+        }
+        int buffer = AL10.alGenBuffers();
+        if (buffer == 0) {
+            LOGGER.warn("alGenBuffers 失败: {}", result.trackId);
+            DECODE_FAILED_AT.put(result.trackId, System.currentTimeMillis());
+            return;
+        }
+        // 共享 MC 的 context 后，AL 错误状态可能混入其它线程的错误；
+        // 这里不再用 alGetError 判断（否则会出现假的“上传失败”） 喵
+        AL10.alBufferData(buffer, AL10.AL_FORMAT_MONO16, result.pcm, result.sampleRate);
+        BUFFER_CACHE.put(result.trackId, new SharedBuffer(buffer, result.durationSeconds));
+        DECODE_FAILED_AT.remove(result.trackId);
+        trimBufferCache();
+    }
+
+    /** 主线程取 buffer：缓存没有就发起后台解码并返回 null（下个 tick 再看） 喵 */
+    private static SharedBuffer acquireBuffer(Track track) {
+        SharedBuffer cached = BUFFER_CACHE.get(track.id());
+        if (cached != null) {
+            cached.users++;
+            return cached;
+        }
+        startDecode(track);
+        return null;
     }
 
     private static void releaseBuffer(SharedBuffer shared) {
@@ -1158,8 +1283,11 @@ public final class SpeakerAudio {
             SharedBuffer shared = acquireBuffer(track);
             if (shared == null) {
                 this.loadedTrack = null;
-                this.failedTrack = track;
-                this.failedAt = clock;
+                // 正在后台解码（或解码队列满）时安静等待，不要当成失败 喵
+                if (!shouldWaitForDecode(track)) {
+                    this.failedTrack = track;
+                    this.failedAt = clock;
+                }
                 return;
             }
             this.shared = shared;
@@ -1240,7 +1368,10 @@ public final class SpeakerAudio {
         Track next = tracks.get(nextIndex);
         if (next.isFile() && !AudioSources.hasLocal(next)) {
             requestAudio(next);
+            return;
         }
+        // 文件已经在本地：提前在后台解码好，下一首开始时不卡 喵
+        prefetchBuffer(next);
     }
 
     /**

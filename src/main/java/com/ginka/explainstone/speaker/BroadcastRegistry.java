@@ -15,6 +15,7 @@ package com.ginka.explainstone.speaker;
 import com.ginka.explainstone.BroadcastTransmitterBlock;
 import net.minecraft.core.BlockPos;
 import net.minecraft.resources.ResourceKey;
+import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.level.Level;
@@ -22,6 +23,7 @@ import net.minecraft.world.level.block.state.BlockState;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -99,6 +101,7 @@ public final class BroadcastRegistry {
         Entry existing = map.get(pos);
         int range = Math.max(32, Math.min(512, be.getTransmitRange()));
         if (!active) {
+            PlaybackPersistence.discard(level.dimension(), pos);
             if (existing != null) {
                 map.remove(pos);
                 stopEntry(level, pos, existing);
@@ -125,7 +128,19 @@ public final class BroadcastRegistry {
             stopEntry(level, pos, existing);
         }
 
-        List<Track> order = PlaybackRegistry.buildOrder(tracks, mode, selected);
+        // 重进存档时优先恢复上次的随机顺序和进度；对不上就重新生成 喵
+        PlaybackPersistence.Saved saved = PlaybackPersistence.claim(level.dimension(), pos);
+        List<Track> order = saved == null ? null : saved.resolveOrder(tracks);
+        if (order != null && (!saved.matches(tracks, mode, selected) || saved.channel() != channel)) {
+            order = null;
+        }
+        long startGameTime = level.getGameTime();
+        boolean restored = order != null;
+        if (order == null) {
+            order = PlaybackRegistry.buildOrder(tracks, mode, selected);
+        } else {
+            startGameTime -= Math.max(0L, saved.elapsedTicks());
+        }
         if (order.isEmpty()) {
             map.remove(pos);
             return;
@@ -148,15 +163,20 @@ public final class BroadcastRegistry {
             return;
         }
         Entry entry = new Entry(channel, tracks, selected, mode, order,
-                SpeakerNetworking.trackDurations(level, order), level.getGameTime(), ++REVISION, range, parts);
+                SpeakerNetworking.trackDurations(level, order), startGameTime, ++REVISION, range, parts);
         map.put(pos.immutable(), entry);
         LOGGER.info("broadcast session start pos={} ch={} mode={} order={} rev={}",
                 pos.toShortString(), channel, mode, order.size(), entry.revision);
+        if (restored) {
+            LOGGER.info("broadcast session resumed pos={} ch={} elapsed={} rev={}", pos.toShortString(),
+                    channel, level.getGameTime() - startGameTime, entry.revision);
+        }
         sendEntry(level, pos, entry);
     }
 
     /** 发信器被拆掉/被替换：撤销登记并通知附近玩家停播 喵 */
     public static void forget(ServerLevel level, BlockPos pos) {
+        PlaybackPersistence.discard(level.dimension(), pos);
         Map<BlockPos, Entry> map = ACTIVE.get(level.dimension());
         if (map == null) {
             return;
@@ -165,6 +185,27 @@ public final class BroadcastRegistry {
         if (removed != null) {
             stopEntry(level, pos, removed);
         }
+    }
+
+    /** 给持久化用：当前所有活跃广播（含已播放 tick） 喵 */
+    static List<PlaybackPersistence.Saved> snapshots(MinecraftServer server) {
+        List<PlaybackPersistence.Saved> out = new ArrayList<>();
+        for (Map.Entry<ResourceKey<Level>, Map<BlockPos, Entry>> entry : ACTIVE.entrySet()) {
+            ServerLevel level = server.getLevel(entry.getKey());
+            if (level == null) {
+                continue;
+            }
+            long now = level.getGameTime();
+            for (Map.Entry<BlockPos, Entry> broadcast : entry.getValue().entrySet()) {
+                Entry session = broadcast.getValue();
+                out.add(new PlaybackPersistence.Saved(entry.getKey(), broadcast.getKey(), true,
+                        session.channel, session.mode.ordinal(), session.selected,
+                        PlaybackPersistence.trackIds(session.sourceTracks),
+                        PlaybackPersistence.trackIds(session.order),
+                        Math.max(0L, now - session.startGameTime)));
+            }
+        }
+        return out;
     }
 
     /** 玩家进服 / 请求 Resync 时补发当前在播的频道 喵 */

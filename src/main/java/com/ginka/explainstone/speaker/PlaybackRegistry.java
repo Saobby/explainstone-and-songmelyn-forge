@@ -15,6 +15,7 @@ package com.ginka.explainstone.speaker;
 import com.ginka.explainstone.SpeakerBlock;
 import net.minecraft.core.BlockPos;
 import net.minecraft.resources.ResourceKey;
+import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.level.Level;
@@ -47,6 +48,27 @@ public final class PlaybackRegistry {
     /** 服务器停止/切换存档时清空，避免单机换世界继承旧会话 喵 */
     public static void clear() {
         ACTIVE.clear();
+    }
+
+    /** 给持久化用：当前所有活跃会话（含已播放 tick） 喵 */
+    static List<PlaybackPersistence.Saved> snapshots(MinecraftServer server) {
+        List<PlaybackPersistence.Saved> out = new ArrayList<>();
+        for (Map.Entry<ResourceKey<Level>, Map<BlockPos, Session>> entry : ACTIVE.entrySet()) {
+            ServerLevel level = server.getLevel(entry.getKey());
+            if (level == null) {
+                continue;
+            }
+            long now = level.getGameTime();
+            for (Map.Entry<BlockPos, Session> sessionEntry : entry.getValue().entrySet()) {
+                Session session = sessionEntry.getValue();
+                out.add(new PlaybackPersistence.Saved(entry.getKey(), sessionEntry.getKey(), false, 0,
+                        session.mode.ordinal(), session.selected,
+                        PlaybackPersistence.trackIds(session.sourceTracks),
+                        PlaybackPersistence.trackIds(session.order),
+                        Math.max(0L, now - session.startGameTime)));
+            }
+        }
+        return out;
     }
 
     private static final class Session {
@@ -202,13 +224,25 @@ public final class PlaybackRegistry {
             return;
         }
 
-        List<Track> order = buildOrder(tracks, mode, selected);
+        // 重进存档时优先恢复上次保存的随机顺序和进度；对不上就重新生成 喵
+        PlaybackPersistence.Saved saved = PlaybackPersistence.claim(level.dimension(), pos);
+        List<Track> order = saved == null ? null : saved.resolveOrder(tracks);
+        if (order != null && !saved.matches(tracks, mode, selected)) {
+            order = null;
+        }
+        long startGameTime = level.getGameTime();
+        boolean restored = order != null;
+        if (order == null) {
+            order = buildOrder(tracks, mode, selected);
+        } else {
+            startGameTime -= Math.max(0L, saved.elapsedTicks());
+        }
         if (order.isEmpty()) {
             stop(level, pos);
             return;
         }
         Session session = new Session(tracks, selected, mode, order,
-                SpeakerNetworking.trackDurations(level, order), level.getGameTime(), ++REVISION);
+                SpeakerNetworking.trackDurations(level, order), startGameTime, ++REVISION);
         session.range = Math.max(64, (int) Math.ceil(be.getEffectiveAudibleRange()) + 16);
         map.put(pos.immutable(), session);
         if (session.trackParts == null) {
@@ -216,6 +250,10 @@ public final class PlaybackRegistry {
         }
         LOGGER.info("playback session start pos={} mode={} order={} rev={}",
                 pos.toShortString(), mode, order.size(), session.revision);
+        if (restored) {
+            LOGGER.info("playback session resumed pos={} elapsed={} rev={}", pos.toShortString(),
+                    level.getGameTime() - startGameTime, session.revision);
+        }
         for (ServerPlayer player : level.players()) {
             if (player.blockPosition().distSqr(pos) <= (double) session.range * session.range) {
                 send(player, pos, session, level);
@@ -224,6 +262,8 @@ public final class PlaybackRegistry {
     }
 
     public static void stop(ServerLevel level, BlockPos pos) {
+        // 停止/拆除后不要再用旧进度恢复 喵
+        PlaybackPersistence.discard(level.dimension(), pos);
         Map<BlockPos, Session> map = ACTIVE.get(level.dimension());
         if (map == null) {
             return;

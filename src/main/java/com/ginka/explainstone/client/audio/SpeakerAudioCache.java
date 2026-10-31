@@ -42,6 +42,8 @@ public final class SpeakerAudioCache {
         if (pending.isComplete()) {
             PENDING.remove(payload.sha1());
             AudioSources.saveLocal(payload.sha1(), pending.bytes());
+            // 下载完成就提前后台解码，真正起播时不用再等 喵
+            SpeakerAudio.prefetchDownloaded(payload.sha1());
             SpeakerAudio.onAudioReceived(payload.sha1());
         }
     }

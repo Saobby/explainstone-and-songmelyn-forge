@@ -37,6 +37,13 @@ Port of the Fabric 1.21.1 edition of **Explainstone / Songmelyn / Broadcast Tran
   revision). Clients reassemble the parts before applying the timeline; the periodic
   session resend sends the full part set again, so late joiners and lost packets self-heal.
   This removes the old single-frame size limit on large playlists.
+* Playback sessions are persisted in `<world>/explainstone/playback.nbt`: the shuffled
+  order and the elapsed position are saved every few seconds and on world save, then
+  restored when the world is loaded again. Shuffle mode resumes the same random order
+  instead of restarting from the selected track every time.
+* Audio decoding runs on a background thread. The first track of a session is decoded
+  asynchronously (the voice starts a moment later instead of freezing the game), and the
+  next track is pre-decoded while the current one plays, so track changes do not hitch.
 * One volume slider controls both loudness and audible range:
   `effective range = audibleRangeAtFullVolume × volume / 100`. Setting it to 0 mutes the
   speaker, so there is no separate sound on/off toggle. Local playback vs. receive mode is
