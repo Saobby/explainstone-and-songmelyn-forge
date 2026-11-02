@@ -563,18 +563,23 @@ public class SpeakerScreen extends Screen {
                 if (index == selected) {
                     context.fill(this.left, y - 1, this.left + this.panelW, y + ROW_H - 2, 0x602E6BE6);
                 }
+                // 灰色 = 这份音频的字节还没到服务端：进度照常走，但暂时没声音 喵
+                boolean playable = AudioSources.playable(track);
                 String prefix = (index + 1) + ". " + (index == selected ? "▶ " : "");
                 String suffix = "";
-                if (track.isFile() && !AudioSources.hasLocal(track)) {
+                if (!playable) {
+                    suffix = "  " + Component.translatable("screen.explainstone.list.pending").getString();
+                } else if (track.isFile() && !AudioSources.hasLocal(track)) {
                     suffix = "  " + Component.translatable("screen.explainstone.list.downloading").getString();
                 }
                 String length = formatTime(AudioSources.durationSeconds(track));
                 int reserved = length == null ? 4 : this.font.width(length) + 6;
                 String name = ellipsize(prefix + track.label() + suffix, this.panelW - 8 - reserved);
-                context.drawString(this.font, name, this.left + 4, y, 0xFFFFFF, true);
+                context.drawString(this.font, name, this.left + 4, y, playable ? 0xFFFFFF : 0x808080, true);
                 if (length != null) {
                     context.drawString(this.font, length,
-                            this.left + this.panelW - 4 - this.font.width(length), y, 0xB0C8FF, true);
+                            this.left + this.panelW - 4 - this.font.width(length), y,
+                            playable ? 0xB0C8FF : 0x707080, true);
                 }
             }
         }

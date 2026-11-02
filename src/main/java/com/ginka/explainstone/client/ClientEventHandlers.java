@@ -13,6 +13,7 @@
 package com.ginka.explainstone.client;
 
 import com.ginka.explainstone.Explainstone;
+import com.ginka.explainstone.client.audio.AudioSources;
 import com.ginka.explainstone.client.audio.SpeakerAudio;
 import com.ginka.explainstone.client.audio.SpeakerUploader;
 import net.minecraft.client.Minecraft;
@@ -43,6 +44,8 @@ public final class ClientEventHandlers {
         Minecraft.getInstance().execute(() -> {
             SpeakerUploader.reset();
             SpeakerAudio.reset();
+            // 服务端可用性缓存只在当前世界有效，换存档不能串味 喵
+            AudioSources.clearServerAvailability();
         });
     }
 }

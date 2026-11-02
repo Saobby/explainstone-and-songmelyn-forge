@@ -22,14 +22,76 @@ import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 /** 音频数据来源：模组自带（jar 内）或玩家导入（本地缓存 / 存档） 喵 */
 public final class AudioSources {
     /** 曲目时长缓存（秒），-1 表示拿不到 喵 */
     private static final Map<String, Integer> DURATIONS = new HashMap<>();
+    /** 服务端说"这份音频的字节在存档里"的 sha1 集合；由播放列表同步和可用性推送共同维护 喵 */
+    private static final Map<String, Boolean> SERVER_AVAILABLE = new ConcurrentHashMap<>();
 
     private AudioSources() {
+    }
+
+    /** 服务端可用性推送：某几份音频上传完成 / 被回收 喵 */
+    public static void setServerAvailable(List<String> sha1s, boolean available) {
+        if (sha1s == null) {
+            return;
+        }
+        for (String sha1 : sha1s) {
+            if (available) {
+                SERVER_AVAILABLE.put(sha1, Boolean.TRUE);
+            } else {
+                SERVER_AVAILABLE.remove(sha1);
+            }
+        }
+    }
+
+    /**
+     * 播放列表同步时带来的可用性位图（快照，自愈用）。
+     *
+     * <p>只用来"点亮"：位图比推送旧，如果拿它把已经可用的曲目又标回不可用，
+     * 就会出现"上传完成 → 立刻变灰/没声音"的抖动。文件的删除走
+     * {@code AudioAvailability(false)} 推送，不靠快照。 喵
+     */
+    public static void applyAvailabilitySnapshot(List<Track> tracks, byte[] bits) {
+        if (tracks == null || bits == null || bits.length == 0) {
+            return;
+        }
+        for (int i = 0; i < tracks.size(); i++) {
+            Track track = tracks.get(i);
+            if (!track.isFile()) {
+                continue;
+            }
+            int index = i >> 3;
+            if (index >= bits.length) {
+                break;
+            }
+            if ((bits[index] & (1 << (i & 7))) != 0) {
+                SERVER_AVAILABLE.put(track.sha1(), Boolean.TRUE);
+            }
+        }
+    }
+
+    /** 服务端有没有这份音频的字节 喵 */
+    public static boolean serverAvailable(Track track) {
+        return !track.isFile() || Boolean.TRUE.equals(SERVER_AVAILABLE.get(track.sha1()));
+    }
+
+    /**
+     * 现在能不能为这条曲目出声：
+     * 本地缓存有（导入者自己），或者服务端有（可以下载）。 喵
+     */
+    public static boolean playable(Track track) {
+        return !track.isFile() || hasLocal(track) || Boolean.TRUE.equals(SERVER_AVAILABLE.get(track.sha1()));
+    }
+
+    /** 退出世界时清掉服务端可用性缓存，换存档不会串味 喵 */
+    public static void clearServerAvailability() {
+        SERVER_AVAILABLE.clear();
     }
 
     /** 直接解析 ogg 头算时长：采样率来自 Vorbis 识别头，总采样数来自最后一个页的 granule 喵 */
@@ -131,6 +193,8 @@ public final class AudioSources {
             Path dir = cacheDir();
             Files.createDirectories(dir);
             Files.write(cacheFile(sha1), bytes);
+            // 新文件到了：之前的时长缓存（可能是 -1）作废 喵
+            DURATIONS.remove("file:" + sha1);
         } catch (IOException ignored) {
         }
     }

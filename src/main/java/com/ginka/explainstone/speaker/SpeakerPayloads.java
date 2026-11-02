@@ -65,6 +65,8 @@ public final class SpeakerPayloads {
     public static final int MAX_PLAYLIST_CHARS = 2_000_000;
     /** 最多允许多少个分片（防御恶意服务端/异常数据） 喵 */
     public static final int MAX_PARTS = 512;
+    /** 可用性位图的最大字节数（10000 首也只需要 1250 字节） 喵 */
+    public static final int MAX_PLAYLIST_BITS_BYTES = 4096;
 
     private SpeakerPayloads() {
     }
@@ -127,8 +129,14 @@ public final class SpeakerPayloads {
         }
     }
 
-    /** 客户端 → 服务端：上传前先问一句这些音频是不是已经存在（带 label，服务端可直接补进播放列表） 喵 */
-    public record AudioQuery(BlockPos pos, long queryId, List<Entry> entries) {
+    /**
+     * 客户端 → 服务端：提交一批要导入的曲目（**只需要元数据**）。
+     *
+     * <p>服务端会立刻把它们加进播放列表（受配额限制），回包里告诉客户端
+     * 哪些 sha1 的字节还没有（{@code missing}），客户端只上传那些。
+     * 这样"上传"和"播放列表"彻底解耦：列表立刻完整，字节慢慢传。 喵
+     */
+    public record PlaylistAdd(BlockPos pos, long queryId, List<Entry> entries) {
         public void encode(FriendlyByteBuf buf) {
             buf.writeBlockPos(this.pos);
             buf.writeLong(this.queryId);
@@ -138,10 +146,12 @@ public final class SpeakerPayloads {
                 Entry entry = this.entries.get(i);
                 buf.writeUtf(entry.label(), MAX_LABEL_LENGTH);
                 buf.writeUtf(entry.sha1(), SHA1_LENGTH);
+                // 时长提示：播放列表的时间轴只依赖元数据，没有它就没法算进度 喵
+                buf.writeVarInt(Math.max(0, entry.seconds()));
             }
         }
 
-        public static AudioQuery decode(FriendlyByteBuf buf) {
+        public static PlaylistAdd decode(FriendlyByteBuf buf) {
             BlockPos pos = buf.readBlockPos();
             long queryId = buf.readLong();
             int size = buf.readVarInt();
@@ -150,42 +160,80 @@ public final class SpeakerPayloads {
             }
             List<Entry> entries = new ArrayList<>(size);
             for (int i = 0; i < size; i++) {
-                entries.add(new Entry(buf.readUtf(MAX_LABEL_LENGTH), buf.readUtf(SHA1_LENGTH)));
+                entries.add(new Entry(buf.readUtf(MAX_LABEL_LENGTH), buf.readUtf(SHA1_LENGTH), buf.readVarInt()));
             }
-            return new AudioQuery(pos, queryId, entries);
+            return new PlaylistAdd(pos, queryId, entries);
         }
 
-        public record Entry(String label, String sha1) {
+        public record Entry(String label, String sha1, int seconds) {
         }
     }
 
-    /** 服务端 → 客户端：预检结果。existing 里的音频已经有了，不需要再上传 喵 */
-    public record AudioQueryResult(BlockPos pos, long queryId, boolean accepted, List<String> existing) {
+    /**
+     * 服务端 → 客户端：提交结果。
+     * missing 里的 sha1 需要上传字节；rejected 里的（配额满 / 时长非法 / 冷却中）没有被加进列表 喵
+     */
+    public record PlaylistAddResult(BlockPos pos, long queryId, boolean accepted,
+                                    List<String> missing, List<String> rejected) {
         public void encode(FriendlyByteBuf buf) {
             buf.writeBlockPos(this.pos);
             buf.writeLong(this.queryId);
             buf.writeBoolean(this.accepted);
-            int size = this.existing == null ? 0 : this.existing.size();
-            buf.writeVarInt(size);
-            for (int i = 0; i < size; i++) {
-                buf.writeUtf(this.existing.get(i), SHA1_LENGTH);
-            }
+            writeSha1List(buf, this.missing);
+            writeSha1List(buf, this.rejected);
         }
 
-        public static AudioQueryResult decode(FriendlyByteBuf buf) {
+        public static PlaylistAddResult decode(FriendlyByteBuf buf) {
             BlockPos pos = buf.readBlockPos();
             long queryId = buf.readLong();
             boolean accepted = buf.readBoolean();
-            int size = buf.readVarInt();
-            if (size < 0 || size > MAX_QUERY_ENTRIES) {
-                size = 0;
-            }
-            List<String> existing = new ArrayList<>(size);
-            for (int i = 0; i < size; i++) {
-                existing.add(buf.readUtf(SHA1_LENGTH));
-            }
-            return new AudioQueryResult(pos, queryId, accepted, existing);
+            List<String> missing = readSha1List(buf);
+            List<String> rejected = readSha1List(buf);
+            return new PlaylistAddResult(pos, queryId, accepted, missing, rejected);
         }
+    }
+
+    /** 服务端 → 客户端：某几份音频的可用性变了（上传完成 / 文件被回收） 喵 */
+    public record AudioAvailability(List<String> sha1, boolean available) {
+        public void encode(FriendlyByteBuf buf) {
+            writeSha1List(buf, this.sha1);
+            buf.writeBoolean(this.available);
+        }
+
+        public static AudioAvailability decode(FriendlyByteBuf buf) {
+            List<String> sha1 = readSha1List(buf);
+            return new AudioAvailability(sha1, buf.readBoolean());
+        }
+    }
+
+    static void writeSha1List(FriendlyByteBuf buf, List<String> values) {
+        int size = values == null ? 0 : values.size();
+        buf.writeVarInt(size);
+        for (int i = 0; i < size; i++) {
+            buf.writeUtf(values.get(i), SHA1_LENGTH);
+        }
+    }
+
+    static List<String> readSha1List(FriendlyByteBuf buf) {
+        int size = buf.readVarInt();
+        if (size < 0 || size > MAX_QUERY_ENTRIES) {
+            size = 0;
+        }
+        List<String> values = new ArrayList<>(size);
+        for (int i = 0; i < size; i++) {
+            values.add(buf.readUtf(SHA1_LENGTH));
+        }
+        return values;
+    }
+
+    /** 可用性位图：第 i 位对应播放顺序里的第 i 首，1 = 本地/服务端有这份音频 喵 */
+    static void writeBits(FriendlyByteBuf buf, byte[] bits) {
+        buf.writeByteArray(bits == null ? new byte[0] : bits);
+    }
+
+    static byte[] readBits(FriendlyByteBuf buf) {
+        byte[] bits = buf.readByteArray(MAX_PLAYLIST_BITS_BYTES);
+        return bits == null ? new byte[0] : bits;
     }
 
     /** 客户端 → 服务端：本地没有这个音频，请求下载 喵 */
@@ -240,7 +288,7 @@ public final class SpeakerPayloads {
      */
     public record Broadcast(int channel, int mode, boolean active, boolean paused, String tracks,
                             int[] durations, long elapsedTicks, long revision, int partIndex, int partCount,
-                            int volume) {
+                            int volume, byte[] available) {
         public void encode(FriendlyByteBuf buf) {
             buf.writeVarInt(this.channel);
             buf.writeVarInt(this.mode);
@@ -253,12 +301,14 @@ public final class SpeakerPayloads {
             buf.writeVarInt(this.partIndex);
             buf.writeVarInt(this.partCount);
             buf.writeVarInt(this.volume);
+            // 可用性位图只在第 0 帧带（其它帧是空的），客户端自己拼 喵
+            writeBits(buf, this.available);
         }
 
         public static Broadcast decode(FriendlyByteBuf buf) {
             return new Broadcast(buf.readVarInt(), buf.readVarInt(), buf.readBoolean(), buf.readBoolean(),
                     buf.readUtf(MAX_PART_CHARS), readDurations(buf), buf.readLong(), buf.readLong(),
-                    buf.readVarInt(), buf.readVarInt(), buf.readVarInt());
+                    buf.readVarInt(), buf.readVarInt(), buf.readVarInt(), readBits(buf));
         }
     }
 
@@ -283,7 +333,8 @@ public final class SpeakerPayloads {
      * 播放列表过大时会拆成 partCount 帧发送，durations 只在第 0 帧带。 喵
      */
     public record Playback(BlockPos pos, int mode, boolean active, boolean paused, String tracks,
-                           int[] durations, long elapsedTicks, long revision, int partIndex, int partCount) {
+                           int[] durations, long elapsedTicks, long revision, int partIndex, int partCount,
+                           byte[] available) {
         public void encode(FriendlyByteBuf buf) {
             buf.writeBlockPos(this.pos);
             buf.writeVarInt(this.mode);
@@ -295,12 +346,14 @@ public final class SpeakerPayloads {
             buf.writeLong(this.revision);
             buf.writeVarInt(this.partIndex);
             buf.writeVarInt(this.partCount);
+            // 可用性位图只在第 0 帧带（其它帧是空的），客户端自己拼 喵
+            writeBits(buf, this.available);
         }
 
         public static Playback decode(FriendlyByteBuf buf) {
             return new Playback(buf.readBlockPos(), buf.readVarInt(), buf.readBoolean(), buf.readBoolean(),
                     buf.readUtf(MAX_PART_CHARS), readDurations(buf), buf.readLong(), buf.readLong(),
-                    buf.readVarInt(), buf.readVarInt());
+                    buf.readVarInt(), buf.readVarInt(), readBits(buf));
         }
     }
 

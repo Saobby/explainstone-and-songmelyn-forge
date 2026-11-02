@@ -12,8 +12,10 @@
  */
 package com.ginka.explainstone;
 
+import com.ginka.explainstone.speaker.AudioStore;
 import com.ginka.explainstone.speaker.AudioUsageRegistry;
 import com.ginka.explainstone.speaker.BroadcastRegistry;
+import com.ginka.explainstone.speaker.PendingImports;
 import com.ginka.explainstone.speaker.PlaybackPersistence;
 import com.ginka.explainstone.speaker.PlaybackRegistry;
 import com.ginka.explainstone.speaker.SpeakerNetworking;
@@ -84,6 +86,8 @@ public class Explainstone {
 	@SubscribeEvent
 	public void onServerAboutToStart(ServerAboutToStartEvent event) {
 		// 世界加载前先读「音频 → 音响」引用表和上次的播放进度 喵
+		// 音频仓库也要先扫一遍：可用性索引是播放列表位图的唯一来源 喵
+		AudioStore.load(event.getServer());
 		AudioUsageRegistry.load(event.getServer());
 		PlaybackPersistence.load(event.getServer());
 	}
@@ -98,6 +102,8 @@ public class Explainstone {
 		SpeakerNetworking.clearUploads();
 		AudioUsageRegistry.save();
 		AudioUsageRegistry.clear();
+		PendingImports.clear();
+		AudioStore.clear();
 	}
 
 	@SubscribeEvent
@@ -105,6 +111,8 @@ public class Explainstone {
 		if (event.phase == TickEvent.Phase.END && ++this.uploadCleanupTicker >= 100) {
 			this.uploadCleanupTicker = 0;
 			SpeakerNetworking.cleanupUploads();
+			// 待上传条目超时就从播放列表里摘掉（防止元数据垃圾永久挂着） 喵
+			PendingImports.tick(event.getServer());
 			// 每 5 秒写一次播放进度，崩溃时最多丢 5 秒 喵
 			PlaybackPersistence.save();
 		}

@@ -95,6 +95,28 @@ public final class ExplainstoneConfig {
                     "Values: system, in-game. Client-side only.")
             .defineInList("filePicker", "system", List.of("system", "in-game"));
 
+    /**
+     * 每个玩家最多同时占多少条"元数据已进列表、字节还没到"的待上传曲目。
+     * 这是乐观导入的代价上限：防止有人只发元数据就把别人的播放列表塞满。 喵
+     */
+    public static final ForgeConfigSpec.IntValue PENDING_IMPORTS_PER_PLAYER = BUILDER
+            .comment("How many 'metadata added, bytes not uploaded yet' tracks one player may hold at once.",
+                    "Pending entries are dropped again after pendingImportTimeoutSeconds without bytes.",
+                    "Lower it if you want to clamp metadata-only spam harder.")
+            .defineInRange("pendingImportsPerPlayer", 500, 1, 2000);
+
+    /** 待上传条目的存活时间（秒）：到点还没收到字节就从播放列表里摘掉 喵 */
+    public static final ForgeConfigSpec.IntValue PENDING_IMPORT_TIMEOUT_SECONDS = BUILDER
+            .comment("Seconds a pending (metadata-only) track survives without its audio bytes arriving.",
+                    "After that the entry is removed from the playlist again.")
+            .defineInRange("pendingImportTimeoutSeconds", 120, 5, 3600);
+
+    /** 校验失败后的冷却时间（秒）：这段时间内该玩家不能再提交导入 喵 */
+    public static final ForgeConfigSpec.IntValue IMPORT_FAILURE_COOLDOWN_SECONDS = BUILDER
+            .comment("Cooldown in seconds after a failed upload validation (bad sha1 / not ogg / too long).",
+                    "0 disables the cooldown.")
+            .defineInRange("importFailureCooldownSeconds", 60, 0, 3600);
+
     /** 单个导入音频文件大小上限（MB） 喵 */
     public static final ForgeConfigSpec.IntValue MAX_AUDIO_FILE_MB = BUILDER
             .comment("Maximum size of an imported ogg file in MiB.",
@@ -210,6 +232,21 @@ public final class ExplainstoneConfig {
             // 配置还没加载/被改坏时按默认的 system 走 喵
             return false;
         }
+    }
+
+    /** 每个玩家同时可占的待上传条目数 喵 */
+    public static int pendingImportsPerPlayer() {
+        return PENDING_IMPORTS_PER_PLAYER.get();
+    }
+
+    /** 待上传条目的存活时间（秒） 喵 */
+    public static int pendingImportTimeoutSeconds() {
+        return PENDING_IMPORT_TIMEOUT_SECONDS.get();
+    }
+
+    /** 校验失败后的冷却时间（秒） 喵 */
+    public static int importFailureCooldownSeconds() {
+        return IMPORT_FAILURE_COOLDOWN_SECONDS.get();
     }
 
     /** 混响湿声增益 喵 */

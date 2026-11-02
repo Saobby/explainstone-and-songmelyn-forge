@@ -87,7 +87,7 @@ public final class SpeakerAudio {
      */
     private record SyncSession(List<Track> tracks, int[] durations, PlayMode mode,
                                long elapsedTicksAtReceive, long receivedClock, long revision,
-                               boolean paused) {
+                               boolean paused, byte[] available) {
         private long elapsedTicks() {
             if (this.paused) {
                 return this.elapsedTicksAtReceive;
@@ -99,7 +99,7 @@ public final class SpeakerAudio {
     private record BroadcastInfo(PlayMode mode, List<Track> tracks, int[] durations,
                                  long elapsedTicksAtReceive, long receivedClock,
                                  long revision, long lastSeenClock, boolean paused,
-                                 int volumePercent) {
+                                 int volumePercent, byte[] available) {
         private long elapsedTicks() {
             if (this.paused) {
                 return this.elapsedTicksAtReceive;
@@ -110,7 +110,7 @@ public final class SpeakerAudio {
         /** 换音量但不打断时间轴：把当前已播 tick 冻结成新的接收点 喵 */
         private BroadcastInfo withVolume(int volume) {
             return new BroadcastInfo(this.mode, this.tracks, this.durations, this.elapsedTicks(),
-                    clock, this.revision, clock, this.paused, volume);
+                    clock, this.revision, clock, this.paused, volume, this.available);
         }
     }
 
@@ -151,6 +151,8 @@ public final class SpeakerAudio {
         boolean paused;
         int volume = 100;
         int[] durations = new int[0];
+        /** 第 0 帧带的可用性位图（与顺序对应） 喵 */
+        byte[] available = new byte[0];
 
         private PartialPlaylist(long revision, int partCount, long clock) {
             this.revision = revision;
@@ -161,7 +163,7 @@ public final class SpeakerAudio {
         }
 
         private boolean put(int index, String part, int[] durations, int mode, long elapsedTicks,
-                            boolean paused, int volume, long clock) {
+                            boolean paused, int volume, byte[] available, long clock) {
             if (index < 0 || index >= this.parts.length || this.parts[index] != null) {
                 return false;
             }
@@ -171,6 +173,9 @@ public final class SpeakerAudio {
             this.totalChars += value.length();
             if (index == 0 && durations != null && durations.length > 0) {
                 this.durations = durations;
+            }
+            if (index == 0 && available != null && available.length > 0) {
+                this.available = available;
             }
             this.mode = mode;
             this.elapsedTicks = elapsedTicks;
@@ -451,7 +456,7 @@ public final class SpeakerAudio {
         // 3.6) 已经停止/被拆掉的方块，清掉本地会话；暂停的会话要保留给进度条 喵
         SESSIONS.entrySet().removeIf(e -> world.isLoaded(e.getKey())
                 && !e.getValue().paused() && !isPlaying(world, e.getKey()));
-        BROADCASTS.entrySet().removeIf(e -> clock - e.getValue().lastSeenClock() > 200);
+        BROADCASTS.entrySet().removeIf(e -> clock - e.getValue().lastSeenClock() > 400);
         // 没凑齐的分片缓存 10 秒后丢弃，避免恶意服务端/切维度时一直占内存 喵
         if (clock % 40 == 0) {
             PARTIAL_SESSIONS.entrySet().removeIf(e -> clock - e.getValue().lastUpdateClock > PARTIAL_TIMEOUT_TICKS);
@@ -941,6 +946,8 @@ public final class SpeakerAudio {
         /** 解码/建 buffer 失败过的曲目，过一段时间才重试，避免每 tick 重试 喵 */
         private Track failedTrack;
         private long failedAt;
+        /** 因为"字节还没到"而静音的曲目：它一变成可用就重新加载 喵 */
+        private Track silentTrack;
         private int rangeHint = 40;
         private int volumePercent = 100;
         private double durationSeconds;
@@ -979,6 +986,23 @@ public final class SpeakerAudio {
             AL10.alSource3f(this.source, AL10.AL_POSITION,
                     pos.getX() + 0.5f, pos.getY() + 0.5f, pos.getZ() + 0.5f);
             AL10.alSourcef(this.source, AL10.AL_PITCH, 1.0f);
+        }
+
+        /**
+         * 这条曲目暂时没有字节可播：立刻静音，但时间轴不动
+         * （进度由服务端 elapsedTicks 驱动，其它客户端照样按同一时间线走）。 喵
+         */
+        private void silence(Track target) {
+            if (target.equals(this.silentTrack)) {
+                return;   // 已经静音了，别每 tick 都 stop 一次 喵
+            }
+            this.silentTrack = target;
+            this.loadedTrack = null;
+            this.failedTrack = null;
+            this.shared = null;
+            if (this.source != 0) {
+                AL10.alSourceStop(this.source);
+            }
         }
 
         /**
@@ -1031,11 +1055,16 @@ public final class SpeakerAudio {
                 return;
             }
             Track target = located.track();
+            // 判断标准只看"本地有没有这份字节"：
+            // 没上传完的曲目服务端不会发字节，所以自然一直静音（进度照常走）；
+            // 一旦字节到了（上传者自己本来就是本地缓存），立刻就能出声，
+            // 不依赖任何"可用性位图"的正确性——位图只用来把界面标灰。 喵
             if (target.isFile() && !AudioSources.hasLocal(target)) {
-                // 当前曲没下载完：先只拉当前曲；开始播放后再预取下一首 喵
                 requestAudio(target);
+                this.silence(target);
                 return;
             }
+            this.silentTrack = null;
             requestNextTrack(tracks, mode, located.index());
 
             if (!target.equals(this.loadedTrack) && !target.equals(this.failedTrack)) {
@@ -1571,7 +1600,7 @@ public final class SpeakerAudio {
             PARTIAL_BROADCASTS.put(channel, partial);
         }
         if (!partial.put(partIndex, payload.tracks(), payload.durations(), payload.mode(),
-                payload.elapsedTicks(), payload.paused(), payload.volume(), clock)) {
+                payload.elapsedTicks(), payload.paused(), payload.volume(), payload.available(), clock)) {
             return;
         }
         if (partial.totalChars > SpeakerPayloads.MAX_PLAYLIST_CHARS) {
@@ -1582,9 +1611,13 @@ public final class SpeakerAudio {
             return;
         }
         PARTIAL_BROADCASTS.remove(channel);
+        List<Track> tracks = parseTracks(partial.joined());
+        // 位图是"可用性快照"：新加入的玩家靠它知道哪些曲目已经能播 喵
+        AudioSources.applyAvailabilitySnapshot(tracks, partial.available);
         BROADCASTS.put(channel, new BroadcastInfo(PlayMode.byOrdinal(partial.mode),
-                parseTracks(partial.joined()), partial.durations, partial.elapsedTicks,
-                partial.firstPartClock, partial.revision, clock, partial.paused, partial.volume));
+                tracks, partial.durations, partial.elapsedTicks,
+                partial.firstPartClock, partial.revision, clock, partial.paused, partial.volume,
+                partial.available));
     }
 
     /**
@@ -1616,12 +1649,15 @@ public final class SpeakerAudio {
             return;
         }
         if (payload.revision() < currentRev) {
+            LOGGER.info("session pos={} ignored: payload rev={} < current rev={}",
+                    key.toShortString(), payload.revision(), currentRev);
             return;
         }
         int partCount = payload.partCount();
         int partIndex = payload.partIndex();
         if (partCount <= 0 || partCount > SpeakerPayloads.MAX_PARTS
                 || partIndex < 0 || partIndex >= partCount) {
+            LOGGER.info("session pos={} ignored: bad part {}/{}", key.toShortString(), partIndex, partCount);
             return;
         }
         if (partial != null && payload.revision() < partial.revision) {
@@ -1638,7 +1674,7 @@ public final class SpeakerAudio {
             PARTIAL_SESSIONS.put(key, partial);
         }
         if (!partial.put(partIndex, payload.tracks(), payload.durations(), payload.mode(),
-                payload.elapsedTicks(), payload.paused(), 100, clock)) {
+                payload.elapsedTicks(), payload.paused(), 100, payload.available(), clock)) {
             return;
         }
         if (partial.totalChars > SpeakerPayloads.MAX_PLAYLIST_CHARS) {
@@ -1649,9 +1685,15 @@ public final class SpeakerAudio {
             return;
         }
         PARTIAL_SESSIONS.remove(key);
-        SESSIONS.put(key, new SyncSession(parseTracks(partial.joined()), partial.durations,
+        List<Track> tracks = parseTracks(partial.joined());
+        // 位图是"可用性快照"：新加入的玩家靠它知道哪些曲目已经能播 喵
+        AudioSources.applyAvailabilitySnapshot(tracks, partial.available);
+        SESSIONS.put(key, new SyncSession(tracks, partial.durations,
                 PlayMode.byOrdinal(partial.mode), partial.elapsedTicks,
-                partial.firstPartClock, partial.revision, partial.paused));
+                partial.firstPartClock, partial.revision, partial.paused, partial.available));
+        LOGGER.info("session pos={} rev={} tracks={} durations={} availableBytes={} elapsed={} paused={}",
+                key.toShortString(), partial.revision, tracks.size(), partial.durations.length,
+                partial.available.length, partial.elapsedTicks, partial.paused);
     }
 
     private static List<Track> parseTracks(String encoded) {

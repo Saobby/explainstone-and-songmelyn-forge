@@ -26,7 +26,9 @@ import net.minecraft.world.level.block.entity.BlockEntityType;
 import net.minecraft.world.level.block.state.BlockState;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * 讲解石方块的数据：播放列表 + 播放模式 + 是否接受红石触发 + 当前选中的曲目。
@@ -57,6 +59,8 @@ public class SpeakerBlockEntity extends BlockEntity {
     private int ticksLeft;
     /** 是否已经把播放列表登记进服务端音频引用表 喵 */
     private boolean audioUsageRegistered;
+    /** sha1 → 时长提示（秒）：导入时客户端先给一个，服务端校验出真实值后覆盖 喵 */
+    private final Map<String, Integer> durationHints = new HashMap<>();
 
     public SpeakerBlockEntity(BlockEntityType<?> type, BlockPos pos, BlockState state) {
         super(type, pos, state);
@@ -140,10 +144,50 @@ public class SpeakerBlockEntity extends BlockEntity {
         }
     }
 
+    /** 按 sha1 删除曲目（待上传超时 / 校验失败时用）；返回是否真的删掉了 喵 */
+    public boolean removeTrackBySha(String sha1) {
+        if (sha1 == null) {
+            return false;
+        }
+        for (int i = 0; i < this.tracks.size(); i++) {
+            Track track = this.tracks.get(i);
+            if (track.isFile() && sha1.equals(track.sha1())) {
+                this.tracks.remove(i);
+                this.durationHints.remove(sha1);
+                if (this.selected >= this.tracks.size()) {
+                    this.selected = Math.max(0, this.tracks.size() - 1);
+                }
+                this.sync();
+                this.refreshAudioUsage();
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // ------------------------------------------------------------ 时长提示 喵
+    /** 客户端给的时长提示（秒）；0 表示未知 喵 */
+    public int durationHint(String sha1) {
+        Integer value = sha1 == null ? null : this.durationHints.get(sha1);
+        return value == null ? 0 : value;
+    }
+
+    /** 记下时长提示；真实文件到达后服务端会用它校验出的值覆盖 喵 */
+    public void setDurationHint(String sha1, int seconds) {
+        if (sha1 == null || seconds <= 0) {
+            return;
+        }
+        Integer old = this.durationHints.put(sha1, seconds);
+        if (old == null || old != seconds) {
+            this.setChanged();
+        }
+    }
+
     /** 清空整个播放列表 喵 */
     public void clearTracks() {
         if (!this.tracks.isEmpty()) {
             this.tracks.clear();
+            this.durationHints.clear();
             this.selected = 0;
             this.sync();
             this.refreshAudioUsage();
@@ -338,6 +382,15 @@ public class SpeakerBlockEntity extends BlockEntity {
             list.add(track.toNbt());
         }
         nbt.put("tracks", list);
+        // 时长提示也要存：没有真实文件时时间轴就靠它算 喵
+        ListTag hints = new ListTag();
+        for (Map.Entry<String, Integer> entry : this.durationHints.entrySet()) {
+            CompoundTag tag = new CompoundTag();
+            tag.putString("sha1", entry.getKey());
+            tag.putInt("seconds", entry.getValue());
+            hints.add(tag);
+        }
+        nbt.put("durationHints", hints);
         nbt.putInt("selected", this.selected);
         nbt.putString("mode", this.mode.getSerializedName());
         nbt.putBoolean("respectRedstone", this.respectRedstone);
@@ -367,6 +420,22 @@ public class SpeakerBlockEntity extends BlockEntity {
             this.tracks.add(sanitizeLoaded(track));
         }
         trimTracksToPacketBudget();
+        this.durationHints.clear();
+        ListTag hints = nbt.getList("durationHints", Tag.TAG_COMPOUND);
+        for (int i = 0; i < hints.size(); i++) {
+            CompoundTag tag = hints.getCompound(i);
+            String sha1 = tag.getString("sha1");
+            int seconds = tag.getInt("seconds");
+            if (SpeakerNetworking.isValidSha1(sha1) && seconds > 0) {
+                this.durationHints.put(sha1, Math.min(seconds, 86_400));
+            }
+        }
+        // 服务端读存档时把"字节早就不在了"的条目清掉：重启后 pending 表是空的，
+        // 谁也不会再来补这些字节，留着就是永远灰着的死条目。客户端同步数据不能清。 喵
+        if (this.level != null && !this.level.isClientSide) {
+            this.tracks.removeIf(track -> track.isFile() && !AudioStore.available(track.sha1()));
+            this.durationHints.keySet().removeIf(sha1 -> !AudioStore.available(sha1));
+        }
         this.selected = nbt.getInt("selected");
         for (PlayMode value : PlayMode.values()) {
             if (value.getSerializedName().equals(nbt.getString("mode"))) {

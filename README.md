@@ -9,20 +9,37 @@ Port of the Fabric 1.21.1 edition of **Explainstone / Songmelyn / Broadcast Tran
   (`<world>/explainstone/audio/<sha1>.ogg`), then streamed to nearby clients on demand.
   Only the current track and the next track in the playlist are fetched: entering a
   speaker's range no longer downloads the whole playlist up front.
-* Before any bytes are sent, the client asks the server with the SHA-1 list of the files
-  it is about to import. The server reports which ones are already stored, adds those
-  tracks to the speaker/transmitter playlist itself, and the client only uploads the
-  missing files — shared audio is transferred once per world.
+* **Importing is metadata-first**: the client first sends the track metadata
+  (`label`, `sha1`, `duration hint`) and the server adds the entries to the playlist
+  *immediately*. The reply lists which SHA-1s still need bytes, and only those are
+  uploaded. The playlist therefore appears complete at once and never grows
+  track-by-track, and per-file progress can no longer reset playback.
+* **Playback never waits for bytes.** Audio availability is derived from the content
+  store (`<world>/explainstone/audio/`), not stored in the playlist, and is synced as a
+  bitmap with the playlist (plus small `AudioAvailability` pushes when a file lands or is
+  reclaimed). Tracks whose bytes are still missing render greyed out with *(pending upload)*;
+  everyone who does not have the file stays silent for that span while the shared timeline
+  keeps running, so uploaders hear their own music immediately and the other players join in
+  as soon as the upload finishes — even for playlists that already referenced the same SHA-1.
+* **Playlist changes are deltas, not rebuilds.** Appending tracks, renaming them, or
+  replacing a duration hint updates the running session in place (the "current track +
+  offset" is preserved); only deleting the currently playing track, changing the selection
+  or the play mode restarts the timeline.
+* Uploads are purely background work: the server re-checks SHA-1, Ogg framing and duration,
+  then writes the file and flips that SHA-1 to available. Validation failures drop the
+  offending entry (and put the uploader on a short cooldown) instead of resetting everyone's
+  playback.
 * The server keeps a `sha1 -> speakers/transmitters` usage map
   (`<world>/explainstone/audio-usage.nbt`). Every playlist change (import, remove,
   delete-all, block broken, chunk load) updates it; once the last reference is gone the
   corresponding `.ogg` is deleted from the world save.
-* Client-side imports run asynchronously: reading, SHA-1 hashing and the local cache write
-  happen off the render thread, and chunks are sent over multiple client ticks. The block
-  UI shows a local-only "Processing %" / "Checking…" / "Uploading %" status.
+* Client-side imports run asynchronously: reading, SHA-1 hashing, duration probing and the
+  local cache write happen off the render thread, and chunks are sent over multiple client
+  ticks. The block UI shows a local-only "Processing %" / "Checking…" / "Uploading %" status.
 * Import limits are configurable: 10 MB / 10 minutes / 500 tracks per playlist by default.
   The server also re-checks the SHA-1, enforces interaction distance, assembles chunks by
-  index and expires abandoned partial uploads.
+  index, expires abandoned partial uploads and limits how many "metadata only" entries one
+  player may keep pending.
 * The import picker uses the desktop's native dialog when one is available — `zenity` /
   `qarma` / `kdialog` on Linux (KDE sessions prefer `kdialog`, others prefer `zenity`),
   AWT `FileDialog` elsewhere — and always forces the dialog on top of the fullscreen game
@@ -157,6 +174,13 @@ maxAudioFileMb = 10
 maxAudioDurationSeconds = 600
 # Maximum number of tracks in one playlist (1-10000).
 maxPlaylistTracks = 500
+# --- Optimistic import limits (server-side) ---
+# How many "metadata added, bytes not uploaded yet" tracks one player may hold at once.
+pendingImportsPerPlayer = 500
+# Seconds a pending entry survives without its bytes; then it is removed from the playlist.
+pendingImportTimeoutSeconds = 120
+# Cooldown in seconds after a failed upload validation (0 disables it).
+importFailureCooldownSeconds = 60
 # --- Server-side anti-abuse limits (defaults are generous for normal play) ---
 # Simultaneous chunked imports per player / on the whole server, and the total
 # memory budget for incomplete uploads in MiB.
@@ -175,14 +199,20 @@ audioDownloadMbPerSecond = 8
 ```
 
 Keep the three import-limit values identical on the client and the server: the client
-checks file size while preparing an upload, hashes the files and asks the server which
-SHA-1s already exist before sending anything. The server still enforces size, SHA-1,
-duration and playlist length for the files that do need uploading. Incomplete multi-chunk
+checks file size while preparing an upload, hashes the files, probes the duration and submits
+the metadata; the server enforces pending-entry quotas, and then enforces size, SHA-1,
+duration and playlist length for the bytes that do need uploading. Incomplete multi-chunk
 uploads are dropped after two minutes without a new chunk, when the player logs out, or when the
-server stops.
+server stops. Pending entries whose bytes never arrive are removed again after
+`pendingImportTimeoutSeconds`, and entries that still reference missing files are pruned from
+the playlist when the world loads.
+
+> **Protocol note:** this import pipeline changed the network protocol
+> (`PROTOCOL_VERSION = 9`): metadata-first playlists, availability bitmap and the
+> `AudioAvailability` push replaced the old pre-upload SHA-1 query. Clients and servers must
+> both run this version (or newer); Forge refuses to connect mixed versions.
 
 ## Differences from the Fabric edition
-
 * Forge `DeferredRegister` / `SimpleChannel` replace the Fabric API registration and
   payload APIs.
 * The JSON config was replaced by a Forge common config (`ForgeConfigSpec`).

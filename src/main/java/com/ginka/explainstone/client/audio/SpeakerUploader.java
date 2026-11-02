@@ -13,6 +13,7 @@
 package com.ginka.explainstone.client.audio;
 
 import com.ginka.explainstone.ExplainstoneConfig;
+import com.ginka.explainstone.speaker.OggUtil;
 import com.ginka.explainstone.speaker.SpeakerNetworking;
 import com.ginka.explainstone.speaker.SpeakerPayloads;
 import net.minecraft.client.Minecraft;
@@ -88,14 +89,14 @@ public final class SpeakerUploader {
         return batch == null || batch.finished ? null : batch.status();
     }
 
-    /** 服务端回答了预检请求：把结果交给对应的上传队列 喵 */
-    public static void onQueryResult(SpeakerPayloads.AudioQueryResult payload) {
+    /** 服务端回答了元数据提交：把结果交给对应的上传队列 喵 */
+    public static void onPlaylistAddResult(SpeakerPayloads.PlaylistAddResult payload) {
         if (payload == null) {
             return;
         }
         Batch batch = BATCHES.get(payload.pos().immutable());
         if (batch != null) {
-            batch.acceptQueryResult(payload.queryId(), payload.accepted(), payload.existing());
+            batch.acceptAddResult(payload.queryId(), payload.accepted(), payload.missing(), payload.rejected());
         }
     }
 
@@ -138,13 +139,14 @@ public final class SpeakerUploader {
         private int sentChunks;
         private long currentUploadedBytes;
         private boolean currentUploaded;
-        /** 正在等服务端回答的预检请求；真正发送在主线程 tick 里做 喵 */
-        private SpeakerPayloads.AudioQuery query;
+        /** 正在等服务端回答的元数据提交；真正发送在主线程 tick 里做 喵 */
+        private SpeakerPayloads.PlaylistAdd query;
         private long queryId;
         private boolean querySent;
         private boolean checkArrived;
         private boolean checkAccepted;
-        private Set<String> existing = Set.of();
+        private Set<String> missing = Set.of();
+        private List<String> rejected = List.of();
 
         private Batch(Minecraft client, BlockPos pos, List<Path> paths) {
             this.client = client;
@@ -185,23 +187,23 @@ public final class SpeakerUploader {
                     this.processedBytes += size;
                     this.currentRead = 0L;
                 }
-                // 第二遍：先问服务端哪些音频已经存在，只上传不存在的 喵
+                // 第二遍：先把元数据提交上去（列表立刻成型），再只上传服务端还没有的字节 喵
                 for (int start = 0; start < scanned.size(); start += SpeakerPayloads.MAX_QUERY_ENTRIES) {
                     if (this.cancelled) {
                         return;
                     }
                     int end = Math.min(scanned.size(), start + SpeakerPayloads.MAX_QUERY_ENTRIES);
                     List<Scanned> round = List.copyOf(scanned.subList(start, end));
-                    Set<String> known = this.checkWithServer(round);
-                    if (known == null) {
+                    Set<String> missing = this.submitMetadata(round);
+                    if (missing == null) {
                         return;
                     }
                     for (Scanned item : round) {
                         if (this.cancelled) {
                             return;
                         }
-                        if (known.contains(item.sha1())) {
-                            // 服务端已有这份音频（预检时已经把曲目加进播放列表），跳过上传 喵
+                        if (!missing.contains(item.sha1())) {
+                            // 服务端已经有这份音频：只补本地缓存，播放器就能直接播 喵
                             this.cacheLocal(item);
                             this.uploadedBytes += item.size();
                             continue;
@@ -221,21 +223,22 @@ public final class SpeakerUploader {
         }
 
 
-        /** 把这一批 SHA-1 发给服务端预检；返回 null 表示取消 喵 */
-        private Set<String> checkWithServer(List<Scanned> round) {
-            List<SpeakerPayloads.AudioQuery.Entry> entries = new ArrayList<>(round.size());
+        /** 把这一批元数据（label / sha1 / 时长提示）提交给服务端；返回 null 表示取消 喵 */
+        private Set<String> submitMetadata(List<Scanned> round) {
+            List<SpeakerPayloads.PlaylistAdd.Entry> entries = new ArrayList<>(round.size());
             for (Scanned item : round) {
-                entries.add(new SpeakerPayloads.AudioQuery.Entry(item.label(), item.sha1()));
+                entries.add(new SpeakerPayloads.PlaylistAdd.Entry(item.label(), item.sha1(), item.seconds()));
             }
             long id = ThreadLocalRandom.current().nextLong();
             synchronized (this.lock) {
                 this.phase = Phase.CHECKING;
                 this.queryId = id;
-                this.query = new SpeakerPayloads.AudioQuery(this.pos, id, entries);
+                this.query = new SpeakerPayloads.PlaylistAdd(this.pos, id, entries);
                 this.querySent = false;
                 this.checkArrived = false;
                 this.checkAccepted = false;
-                this.existing = Set.of();
+                this.missing = Set.of();
+                this.rejected = List.of();
                 this.lock.notifyAll();
             }
             long deadline = System.currentTimeMillis() + CHECK_TIMEOUT_MS;
@@ -256,6 +259,7 @@ public final class SpeakerUploader {
                     return null;
                 }
                 if (!this.checkArrived) {
+                    LOGGER.warn("playlist-add 没有回应（pos={}），已取消本批导入", this.pos.toShortString());
                     error("message.explainstone.import.check_timeout");
                     this.cancelled = true;
                     return null;
@@ -265,31 +269,40 @@ public final class SpeakerUploader {
                     this.cancelled = true;
                     return null;
                 }
+                if (!this.rejected.isEmpty()) {
+                    error("message.explainstone.import.rejected", this.rejected.size());
+                }
                 this.query = null;
-                return this.existing;
+                return this.missing;
             }
         }
 
-        /** 主线程收到预检结果后交给后台线程 喵 */
-        private void acceptQueryResult(long queryId, boolean accepted, List<String> existing) {
+        /** 主线程收到提交结果后交给后台线程 喵 */
+        private void acceptAddResult(long queryId, boolean accepted, List<String> missing, List<String> rejected) {
             synchronized (this.lock) {
                 if (this.phase != Phase.CHECKING || this.queryId != queryId || this.checkArrived) {
                     return;
                 }
-                this.existing = existing == null ? Set.of() : new HashSet<>(existing);
+                this.missing = missing == null ? Set.of() : new HashSet<>(missing);
+                this.rejected = rejected == null ? List.of() : List.copyOf(rejected);
                 this.checkAccepted = accepted;
                 this.checkArrived = true;
                 this.lock.notifyAll();
             }
+            LOGGER.info("playlist-add result pos={} accepted={} missing={} rejected={}",
+                    this.pos.toShortString(), accepted, missing == null ? 0 : missing.size(),
+                    rejected == null ? 0 : rejected.size());
         }
 
-        /** 只流式读一遍文件算 SHA-1（顺手检查 OggS 头），不占内存 喵 */
+        /** 只流式读一遍文件算 SHA-1 和时长提示（顺手检查 OggS 头），不占内存 喵 */
         private Scanned scan(Path path) {
             try (InputStream in = Files.newInputStream(path)) {
                 MessageDigest digest = MessageDigest.getInstance("SHA-1");
                 byte[] buffer = new byte[64 * 1024];
-                byte[] head = new byte[4];
+                byte[] head = new byte[OggUtil.EDGE_BYTES];
+                byte[] tail = new byte[OggUtil.EDGE_BYTES];
                 int headLength = 0;
+                int tailLength = 0;
                 long read = 0L;
                 int n;
                 while ((n = in.read(buffer)) >= 0) {
@@ -304,6 +317,18 @@ public final class SpeakerUploader {
                         System.arraycopy(buffer, 0, head, headLength, copy);
                         headLength += copy;
                     }
+                    // 尾部缓冲只留最后 EDGE_BYTES 个字节：末尾 page 的 granule 就在这里 喵
+                    if (n >= tail.length) {
+                        System.arraycopy(buffer, n - tail.length, tail, 0, tail.length);
+                        tailLength = tail.length;
+                    } else {
+                        int keep = Math.min(tailLength, tail.length - n);
+                        if (keep > 0) {
+                            System.arraycopy(tail, tailLength - keep, tail, 0, keep);
+                        }
+                        System.arraycopy(buffer, 0, tail, keep, n);
+                        tailLength = keep + n;
+                    }
                     digest.update(buffer, 0, n);
                     read += n;
                     this.currentRead = read;
@@ -312,7 +337,14 @@ public final class SpeakerUploader {
                         return null;
                     }
                 }
-                if (!isOgg(head, headLength)) {
+                if (headLength < 4 || !OggUtil.isOgg(head)) {
+                    error("message.explainstone.import.not_ogg");
+                    return null;
+                }
+                // 时长提示：播放列表时间轴只依赖元数据，没有它连进度都算不出来 喵
+                int seconds = OggUtil.durationSeconds(OggUtil.sampleRate(head, headLength),
+                        OggUtil.lastGranule(tail, tailLength));
+                if (seconds <= 0) {
                     error("message.explainstone.import.not_ogg");
                     return null;
                 }
@@ -321,7 +353,7 @@ public final class SpeakerUploader {
                     error("message.explainstone.import.failed");
                     return null;
                 }
-                return new Scanned(labelOf(path), sha1, path, read);
+                return new Scanned(labelOf(path), sha1, path, read, seconds);
             } catch (IOException e) {
                 error("message.explainstone.import.read_failed", String.valueOf(e.getMessage()));
                 LOGGER.warn("读取导入文件失败: {}", path, e);
@@ -505,12 +537,7 @@ public final class SpeakerUploader {
         }
 
         private static boolean isOgg(byte[] bytes) {
-            return bytes.length > 4 && bytes[0] == 'O' && bytes[1] == 'g'
-                    && bytes[2] == 'g' && bytes[3] == 'S';
-        }
-
-        private static boolean isOgg(byte[] head, int length) {
-            return length >= 4 && head[0] == 'O' && head[1] == 'g' && head[2] == 'g' && head[3] == 'S';
+            return OggUtil.isOgg(bytes);
         }
 
         /** 文件名去掉 .ogg 当曲目名，并限制网络包里的长度 喵 */
@@ -539,7 +566,7 @@ public final class SpeakerUploader {
     }
 
     /** 预检阶段只记住这些信息，等确认需要上传再读一遍文件 喵 */
-    private record Scanned(String label, String sha1, Path path, long size) {
+    private record Scanned(String label, String sha1, Path path, long size, int seconds) {
     }
 }
 

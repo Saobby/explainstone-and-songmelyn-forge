@@ -242,16 +242,9 @@ public final class AudioUsageRegistry {
     }
 
     private static void deleteAudio(ServerLevel level, String sha1) {
-        MinecraftServer server = level.getServer();
-        if (server != null) {
-            try {
-                if (Files.deleteIfExists(SpeakerNetworking.audioFile(server, sha1))) {
-                    LOGGER.info("音频 {} 已不再被任何音响使用，删除存档内的文件", sha1);
-                }
-            } catch (IOException e) {
-                LOGGER.warn("删除音频 {} 失败: {}", sha1, e.toString());
-            }
-        }
-        SpeakerNetworking.forgetDuration(sha1);
+        // 走 AudioStore：删文件的同时把可用性索引和时长缓存一起更新 喵
+        AudioStore.delete(sha1);
+        // 立刻告诉客户端这份音频没了，否则它们会一直以为可以播放 喵
+        SpeakerNetworking.broadcastAvailability(level, java.util.List.of(sha1), false);
     }
 }

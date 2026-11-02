@@ -51,69 +51,31 @@ public final class BroadcastRegistry {
 
     private static final class Entry {
         final int channel;
-        final List<Track> sourceTracks;
         final int selected;
         final PlayMode mode;
-        final List<Track> order;
-        final int[] durations;
-        long startGameTime;
+        final SessionTimeline timeline;
         long revision;
-        /** 已经切好的曲目分片；列表过大时为 null（不下发） 喵 */
-        final List<String> trackParts;
         int range;
         /** 发信器全局音量（0-100）：收信音响的实际音量 = 本机音量 × 它 喵 */
         int volume;
-        /** 用户暂停：广播时间线冻结，收信端静音但保留进度显示 喵 */
-        boolean paused;
-        long pausedElapsed;
         /** 上次重发时间，用于限制恶意刷操作导致的广播重推放大 喵 */
         long lastSentMs = System.currentTimeMillis();
+        /** 上次同步时的音频仓库版本：变了就重发一次（有人上传完/文件被回收） 喵 */
+        long availabilityVersion = AudioStore.version();
 
-        private Entry(int channel, List<Track> sourceTracks, int selected, PlayMode mode, List<Track> order,
-                      int[] durations, long startGameTime, long revision, int range, int volume,
-                      List<String> trackParts, boolean paused, long pausedElapsed) {
+        private Entry(int channel, int selected, PlayMode mode, SessionTimeline timeline,
+                      long revision, int range, int volume) {
             this.channel = channel;
-            this.sourceTracks = sourceTracks;
             this.selected = selected;
             this.mode = mode;
-            this.order = order;
-            this.durations = durations;
-            this.startGameTime = startGameTime;
+            this.timeline = timeline;
             this.revision = revision;
             this.range = range;
             this.volume = volume;
-            this.trackParts = trackParts;
-            this.paused = paused;
-            this.pausedElapsed = Math.max(0L, pausedElapsed);
-        }
-
-        private boolean matches(int channel, List<Track> tracks, PlayMode mode, int selected) {
-            return this.channel == channel && this.selected == selected && this.mode == mode
-                    && this.sourceTracks.equals(tracks);
         }
 
         private long elapsedTicks(ServerLevel level) {
-            if (this.paused) {
-                return this.pausedElapsed;
-            }
-            return Math.max(0L, level.getGameTime() - this.startGameTime);
-        }
-
-        private boolean pause(ServerLevel level) {
-            if (this.paused) {
-                return false;
-            }
-            this.pausedElapsed = this.elapsedTicks(level);
-            this.paused = true;
-            return true;
-        }
-
-        private void resume(ServerLevel level) {
-            if (!this.paused) {
-                return;
-            }
-            this.startGameTime = level.getGameTime() - this.pausedElapsed;
-            this.paused = false;
+            return this.timeline.elapsedTicks(level.getGameTime());
         }
     }
 
@@ -134,70 +96,48 @@ public final class BroadcastRegistry {
         Entry existing = map.get(pos);
         int range = Math.max(32, Math.min(512, be.getTransmitRange()));
         int volume = Math.max(0, Math.min(100, be.getBroadcastVolume()));
+        long now = level.getGameTime();
         if (paused) {
-            if (existing != null && existing.matches(channel, tracks, mode, selected)) {
+            if (existing != null && existing.channel == channel
+                    && existing.selected == selected && existing.mode == mode) {
                 existing.range = range;
                 updateVolume(level, pos, existing, volume);
-                long nowMs = System.currentTimeMillis();
-                if (existing.pause(level)) {
-                    // 暂停快照：收信端静音但保留进度，等到恢复时再继续 喵
-                    existing.revision = ++REVISION;
-                    existing.lastSentMs = nowMs;
-                    long elapsed = existing.elapsedTicks(level);
-                    sendEntry(level, pos, existing);
-                    LOGGER.info("broadcast session paused pos={} ch={} elapsed={} rev={}",
-                            pos.toShortString(), existing.channel, elapsed, existing.revision);
-                } else if (nowMs - existing.lastSentMs >= 5000L) {
-                    // 暂停期间每 5 秒重发一次，收信端的进度条不会因为 10 秒没更新被丢掉 喵
-                    existing.lastSentMs = nowMs;
-                    sendEntry(level, pos, existing);
+                boolean changed = existing.timeline.pause(now);
+                SessionTimeline.Result result = existing.timeline.apply(tracks, mode, now,
+                        track -> SpeakerNetworking.trackDuration(level, be, track));
+                if (result == SessionTimeline.Result.UPDATED
+                        || existing.availabilityVersion != AudioStore.version()) {
+                    existing.availabilityVersion = AudioStore.version();
+                    changed = true;
                 }
-                return;
-            }
-            if (existing != null) {
+                if (result == SessionTimeline.Result.REBUILD) {
+                    // 时间轴对不上（当前曲目被删等）：只能重建 喵
+                    map.remove(pos);
+                    PlaybackPersistence.discard(level.dimension(), pos);
+                    stopEntry(level, pos, existing);
+                } else {
+                    long nowMs = System.currentTimeMillis();
+                    if (changed) {
+                        // 换个 revision，收信端保留进度条但继续静音 喵
+                        existing.revision = ++REVISION;
+                        existing.lastSentMs = nowMs;
+                        sendEntry(level, pos, existing);
+                        LOGGER.info("broadcast session paused pos={} ch={} elapsed={} rev={}",
+                                pos.toShortString(), channel, existing.elapsedTicks(level), existing.revision);
+                    } else if (nowMs - existing.lastSentMs >= 5000L) {
+                        // 暂停期间每 5 秒重发一次，收信端进度条不会因为太久没更新被丢掉 喵
+                        existing.lastSentMs = nowMs;
+                        sendEntry(level, pos, existing);
+                    }
+                    return;
+                }
+            } else if (existing != null) {
                 // 暂停期间换了频道/列表：旧广播作废，按新列表重建暂停快照 喵
                 map.remove(pos);
                 PlaybackPersistence.discard(level.dimension(), pos);
                 stopEntry(level, pos, existing);
             }
-
-            PlaybackPersistence.Saved saved = PlaybackPersistence.claim(level.dimension(), pos);
-            List<Track> order = saved == null ? null : saved.resolveOrder(tracks);
-            if (order != null && (!saved.matches(tracks, mode, selected) || saved.channel() != channel)) {
-                order = null;
-            }
-            long elapsed = order == null ? 0L : Math.max(0L, saved.elapsedTicks());
-            if (order == null) {
-                order = PlaybackRegistry.buildOrder(tracks, mode, selected);
-            }
-            if (order.isEmpty()) {
-                map.remove(pos);
-                return;
-            }
-            String encoded = PlaybackRegistry.encode(order);
-            List<String> parts = null;
-            if (encoded.length() > SpeakerPayloads.MAX_PLAYLIST_CHARS) {
-                LOGGER.warn("广播列表编码后 {} 字符，超过上限 {}，pos={} 暂不下发", encoded.length(),
-                        SpeakerPayloads.MAX_PLAYLIST_CHARS, pos.toShortString());
-            } else {
-                parts = SpeakerPayloads.splitTracks(encoded);
-                if (parts.size() > SpeakerPayloads.MAX_PARTS) {
-                    LOGGER.warn("广播列表需要 {} 个分片，超过上限 {}，pos={} 暂不下发", parts.size(),
-                            SpeakerPayloads.MAX_PARTS, pos.toShortString());
-                    parts = null;
-                }
-            }
-            if (parts == null) {
-                map.remove(pos);
-                return;
-            }
-            Entry entry = new Entry(channel, tracks, selected, mode, order,
-                    SpeakerNetworking.trackDurations(level, order), level.getGameTime() - elapsed,
-                    ++REVISION, range, volume, parts, true, elapsed);
-            map.put(pos.immutable(), entry);
-            LOGGER.info("broadcast session paused pos={} ch={} mode={} order={} elapsed={} rev={}",
-                    pos.toShortString(), channel, mode, order.size(), elapsed, entry.revision);
-            sendEntry(level, pos, entry);
+            spawn(level, pos, map, be, tracks, channel, selected, mode, range, volume, true);
             return;
         }
         if (!active) {
@@ -209,84 +149,92 @@ public final class BroadcastRegistry {
             return;
         }
 
-        if (existing != null && existing.matches(channel, tracks, mode, selected)) {
+        if (existing != null && existing.channel == channel
+                && existing.selected == selected && existing.mode == mode) {
             boolean rangeChanged = existing.range != range;
-            boolean volumeChanged = existing.volume != volume;
             existing.range = range;
             // 音量变了只发小包，立即生效；整张播放列表仍然按下面的节流重推 喵
             updateVolume(level, pos, existing, volume);
-            if (existing.paused) {
-                // 恢复：沿用暂停时的顺序和位置，客户端重新开始出声 喵
-                existing.resume(level);
+            boolean resumed = existing.timeline.resume(now);
+            SessionTimeline.Result result = existing.timeline.apply(tracks, mode, now,
+                    track -> SpeakerNetworking.trackDuration(level, be, track));
+            if (result == SessionTimeline.Result.REBUILD) {
+                map.remove(pos);
+                PlaybackPersistence.discard(level.dimension(), pos);
+                stopEntry(level, pos, existing);
+            } else {
+                boolean changed = resumed || rangeChanged
+                        || result == SessionTimeline.Result.UPDATED;
+                if (existing.availabilityVersion != AudioStore.version()) {
+                    // 有音频上传完成/被回收：位图变了，要让收信端立刻更新 喵
+                    existing.availabilityVersion = AudioStore.version();
+                    changed = true;
+                }
+                long nowMs = System.currentTimeMillis();
+                if (!changed) {
+                    // 什么都没变，但发信器的 ticker 只会每 5 秒调一次这里！
+                    // 必须定期重推当 keep-alive，否则客户端 10 秒后会把广播丢掉、收信音响静音 喵
+                    if (nowMs - existing.lastSentMs < 4000L) {
+                        return;
+                    }
+                    existing.lastSentMs = nowMs;
+                    sendEntry(level, pos, existing);
+                    return;
+                }
+                if (!resumed && nowMs - existing.lastSentMs < 1000L) {
+                    // 节流：防止连续刷界面操作放大成大量重推 喵
+                    return;
+                }
+                existing.lastSentMs = nowMs;
                 existing.revision = ++REVISION;
-                existing.lastSentMs = System.currentTimeMillis();
-                long elapsed = existing.elapsedTicks(level);
                 sendEntry(level, pos, existing);
-                LOGGER.info("broadcast session resumed pos={} ch={} elapsed={} rev={}",
-                        pos.toShortString(), channel, elapsed, existing.revision);
+                LOGGER.info("broadcast session {} pos={} ch={} order={} paused={} rev={}",
+                        resumed ? "resumed" : "updated", pos.toShortString(), channel,
+                        existing.timeline.order().size(), existing.timeline.paused(), existing.revision);
                 return;
             }
-            if (volumeChanged && !rangeChanged) {
-                // 只是全局音量变了：小包已经发出去了，别把整张播放列表重推一遍 喵
-                return;
-            }
-            // 只是传播距离变了：保留原进度，重新下发一次（但最多 1 秒一次，防止刷操作放大） 喵
-            long now = System.currentTimeMillis();
-            if (now - existing.lastSentMs < 1000L) {
-                return;
-            }
-            existing.lastSentMs = now;
-            sendEntry(level, pos, existing);
-            return;
-        }
-        if (existing != null) {
+        } else if (existing != null) {
             // 频道/列表/模式变了：先让旧频道的客户端停下 喵
             stopEntry(level, pos, existing);
         }
+        spawn(level, pos, map, be, tracks, channel, selected, mode, range, volume, false);
+    }
 
-        // 重进存档时优先恢复上次的随机顺序和进度；对不上就重新生成 喵
+    /** 新建一个广播会话（优先恢复上次保存的随机顺序和进度） 喵 */
+    private static void spawn(ServerLevel level, BlockPos pos, Map<BlockPos, Entry> map, SpeakerBlockEntity be,
+                              List<Track> tracks, int channel, int selected, PlayMode mode,
+                              int range, int volume, boolean paused) {
         PlaybackPersistence.Saved saved = PlaybackPersistence.claim(level.dimension(), pos);
         List<Track> order = saved == null ? null : saved.resolveOrder(tracks);
         if (order != null && (!saved.matches(tracks, mode, selected) || saved.channel() != channel)) {
             order = null;
         }
         long startGameTime = level.getGameTime();
+        long pausedElapsed = 0L;
         boolean restored = order != null;
         if (order == null) {
             order = PlaybackRegistry.buildOrder(tracks, mode, selected);
         } else {
-            startGameTime -= Math.max(0L, saved.elapsedTicks());
+            pausedElapsed = Math.max(0L, saved.elapsedTicks());
+            startGameTime -= pausedElapsed;
         }
         if (order.isEmpty()) {
             map.remove(pos);
             return;
         }
-        String encoded = PlaybackRegistry.encode(order);
-        List<String> parts = null;
-        if (encoded.length() > SpeakerPayloads.MAX_PLAYLIST_CHARS) {
-            LOGGER.warn("广播列表编码后 {} 字符，超过上限 {}，pos={} 暂不下发", encoded.length(),
-                    SpeakerPayloads.MAX_PLAYLIST_CHARS, pos.toShortString());
-        } else {
-            parts = SpeakerPayloads.splitTracks(encoded);
-            if (parts.size() > SpeakerPayloads.MAX_PARTS) {
-                LOGGER.warn("广播列表需要 {} 个分片，超过上限 {}，pos={} 暂不下发", parts.size(),
-                        SpeakerPayloads.MAX_PARTS, pos.toShortString());
-                parts = null;
-            }
+        SessionTimeline timeline = new SessionTimeline(tracks, order,
+                SpeakerNetworking.trackDurations(level, be, order), startGameTime, paused, pausedElapsed);
+        if (timeline.parts() == null) {
+            LOGGER.warn("广播列表无法下发，pos={}（{} 首，编码 {} 字符）",
+                    pos.toShortString(), order.size(), SessionTimeline.encode(order).length());
         }
-        if (parts == null) {
-            map.remove(pos);
-            return;
-        }
-        Entry entry = new Entry(channel, tracks, selected, mode, order,
-                SpeakerNetworking.trackDurations(level, order), startGameTime, ++REVISION, range, volume, parts,
-                false, 0L);
+        Entry entry = new Entry(channel, selected, mode, timeline, ++REVISION, range, volume);
         map.put(pos.immutable(), entry);
-        LOGGER.info("broadcast session start pos={} ch={} mode={} order={} rev={}",
-                pos.toShortString(), channel, mode, order.size(), entry.revision);
+        LOGGER.info("broadcast session {} pos={} ch={} mode={} order={} rev={}",
+                paused ? "paused" : "start", pos.toShortString(), channel, mode, order.size(), entry.revision);
         if (restored) {
             LOGGER.info("broadcast session resumed pos={} ch={} elapsed={} rev={}", pos.toShortString(),
-                    channel, level.getGameTime() - startGameTime, entry.revision);
+                    channel, timeline.elapsedTicks(level.getGameTime()), entry.revision);
         }
         sendEntry(level, pos, entry);
     }
@@ -316,8 +264,8 @@ public final class BroadcastRegistry {
                 Entry session = broadcast.getValue();
                 out.add(new PlaybackPersistence.Saved(entry.getKey(), broadcast.getKey(), true,
                         session.channel, session.mode.ordinal(), session.selected,
-                        PlaybackPersistence.trackIds(session.sourceTracks),
-                        PlaybackPersistence.trackIds(session.order),
+                        PlaybackPersistence.trackIds(session.timeline.sourceTracks()),
+                        PlaybackPersistence.trackIds(session.timeline.order()),
                         session.elapsedTicks(level)));
             }
         }
@@ -350,7 +298,7 @@ public final class BroadcastRegistry {
             for (ServerPlayer player : level.players()) {
                 SpeakerNetworking.sendToPlayer(player, new SpeakerPayloads.Broadcast(
                         entry.channel, 0, false, false, "", new int[0], entry.elapsedTicks(level),
-                        entry.revision, 0, 1, entry.volume));
+                        entry.revision, 0, 1, entry.volume, new byte[0]));
             }
         }
         map.clear();
@@ -365,16 +313,18 @@ public final class BroadcastRegistry {
     }
 
     private static void send(Entry entry, ServerLevel level, ServerPlayer player) {
-        List<String> parts = entry.trackParts;
+        List<String> parts = entry.timeline.parts();
         if (parts == null || parts.isEmpty()) {
             return;   // 列表过大：不下发，避免服务端编码异常 喵
         }
         long elapsed = entry.elapsedTicks(level);
+        int[] durations = entry.timeline.durations();
+        byte[] available = SessionTimeline.availabilityBits(entry.timeline.order());
         for (int i = 0; i < parts.size(); i++) {
-            int[] durations = i == 0 ? entry.durations : new int[0];
             SpeakerNetworking.sendToPlayer(player, new SpeakerPayloads.Broadcast(entry.channel,
-                    entry.mode.ordinal(), true, entry.paused, parts.get(i), durations, elapsed,
-                    entry.revision, i, parts.size(), entry.volume));
+                    entry.mode.ordinal(), true, entry.timeline.paused(), parts.get(i),
+                    i == 0 ? durations : new int[0], elapsed, entry.revision, i, parts.size(),
+                    entry.volume, i == 0 ? available : new byte[0]));
         }
     }
 
@@ -400,7 +350,7 @@ public final class BroadcastRegistry {
             if (player.blockPosition().distSqr(pos) <= (double) entry.range * entry.range) {
                 SpeakerNetworking.sendToPlayer(player, new SpeakerPayloads.Broadcast(
                         entry.channel, 0, false, false, "", new int[0], elapsed, entry.revision, 0, 1,
-                        entry.volume));
+                        entry.volume, new byte[0]));
             }
         }
     }

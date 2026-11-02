@@ -12,6 +12,7 @@
  */
 package com.ginka.explainstone.client;
 
+import com.ginka.explainstone.client.audio.AudioSources;
 import com.ginka.explainstone.client.audio.SpeakerAudio;
 import com.ginka.explainstone.client.audio.SpeakerAudioCache;
 import com.ginka.explainstone.client.audio.SpeakerUploader;
@@ -39,8 +40,13 @@ public final class ClientNetworkHandler {
         SpeakerAudio.onPlayback(payload);
     }
 
-    /** 上传前预检结果：告诉上传队列哪些音频不用再传 喵 */
-    public static void handleAudioQueryResult(SpeakerPayloads.AudioQueryResult payload) {
-        SpeakerUploader.onQueryResult(payload);
+    /** 导入元数据提交结果：告诉上传队列哪些 sha1 的字节还要传 喵 */
+    public static void handlePlaylistAddResult(SpeakerPayloads.PlaylistAddResult payload) {
+        SpeakerUploader.onPlaylistAddResult(payload);
+    }
+
+    /** 某几份音频上传完成 / 被回收：更新本地可用性缓存 喵 */
+    public static void handleAudioAvailability(SpeakerPayloads.AudioAvailability payload) {
+        AudioSources.setServerAvailable(payload.sha1(), payload.available());
     }
 }
