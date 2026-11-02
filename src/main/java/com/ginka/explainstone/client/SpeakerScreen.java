@@ -18,6 +18,7 @@ import com.ginka.explainstone.SpeakerBlock;
 import com.ginka.explainstone.client.audio.AudioSources;
 import com.ginka.explainstone.client.audio.SpeakerAudio;
 import com.ginka.explainstone.client.audio.SpeakerUploader;
+import com.ginka.explainstone.client.dialog.OggFilePicker;
 import com.ginka.explainstone.client.widget.IntSlider;
 import com.ginka.explainstone.speaker.SpeakerBlockEntity;
 import com.ginka.explainstone.speaker.SpeakerNetworking;
@@ -33,7 +34,6 @@ import net.minecraft.network.chat.Component;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraftforge.fml.loading.FMLPaths;
 
-import java.io.File;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -55,6 +55,8 @@ public class SpeakerScreen extends Screen {
     private final BlockPos pos;
     private int scroll;
     private boolean updatingField;
+    /** 系统文件框/游戏内选择器正开着，避免重复点导入叠出好几个窗口 喵 */
+    private boolean pickerOpen;
 
     // 自适应布局（init() 里算好） 喵
     private int panelW;
@@ -691,76 +693,64 @@ public class SpeakerScreen extends Screen {
         return true;
     }
 
-    /** 导入按钮：先开系统文件选择框，选不了再退回 inbox 目录里已有的 ogg 喵 */
+    /**
+     * 导入按钮：
+     * 先开系统文件框（Linux 上优先 zenity/kdialog，其次 AWT）；
+     * 系统框彻底用不了时改成游戏内文件浏览器，保证任何平台都能导入 喵
+     */
     private void onImportClicked() {
         Path inbox = FMLPaths.CONFIGDIR.get().resolve("explainstone").resolve("inbox");
         try {
             Files.createDirectories(inbox);
         } catch (IOException ignored) {
         }
-        this.openFileDialog(inbox);
-    }
-
-    private void openFileDialog(Path inbox) {
+        if (this.pickerOpen) {
+            // 已经有一个选择框开着，别叠第二个 喵
+            return;
+        }
+        this.pickerOpen = true;
         Minecraft client = Minecraft.getInstance();
+        String title = Component.translatable("screen.explainstone.picker.title").getString();
         Thread thread = new Thread(() -> {
-            List<Path> chosen = new java.util.ArrayList<>();
-            boolean failed = false;
-            try {
-                java.awt.FileDialog dialog = new java.awt.FileDialog((java.awt.Frame) null, "选择 ogg 音频",
-                        java.awt.FileDialog.LOAD);
-                dialog.setDirectory(inbox.toString());
-                dialog.setFilenameFilter((dir, name) -> name.toLowerCase().endsWith(".ogg"));
-                dialog.setMultipleMode(true);
-                dialog.setVisible(true);
-                File[] selectedFiles = dialog.getFiles();
-                if (selectedFiles != null) {
-                    for (File file : selectedFiles) {
-                        if (file != null && file.getName().toLowerCase().endsWith(".ogg")) {
-                            chosen.add(file.toPath());
-                        }
-                    }
-                }
-                dialog.dispose();
-            } catch (Throwable t) {
-                failed = true;
-            }
-            if (chosen.isEmpty() && failed) {
-                try {
-                    javax.swing.SwingUtilities.invokeAndWait(() -> {
-                        javax.swing.JFileChooser chooser = new javax.swing.JFileChooser();
-                        chooser.setDialogTitle("选择 ogg 音频");
-                        chooser.setFileFilter(new javax.swing.filechooser.FileNameExtensionFilter("Ogg 音频 (*.ogg)", "ogg"));
-                        chooser.setCurrentDirectory(inbox.toFile());
-                        chooser.setMultiSelectionEnabled(true);
-                        if (chooser.showOpenDialog(null) == javax.swing.JFileChooser.APPROVE_OPTION) {
-                            for (File file : chooser.getSelectedFiles()) {
-                                if (file != null && file.getName().toLowerCase().endsWith(".ogg")) {
-                                    chosen.add(file.toPath());
-                                }
-                            }
-                        }
-                    });
-                } catch (Throwable ignored) {
-                }
-            }
-            final List<Path> result = List.copyOf(chosen);
+            OggFilePicker.Result result = OggFilePicker.pick(inbox, title);
             client.execute(() -> {
-                if (!result.isEmpty()) {
-                    SpeakerUploader.start(client, this.pos, result);
-                    return;
-                }
-                List<Path> files = listInbox(inbox);
-                if (!files.isEmpty()) {
-                    SpeakerUploader.start(client, this.pos, files);
-                    info(client, Component.translatable("message.explainstone.import.queued", files.size()));
-                } else {
-                    info(client, Component.translatable("message.explainstone.import.none", inbox.toString()));
-                }
+                this.pickerOpen = false;
+                this.handlePickResult(client, inbox, result);
             });
         }, "explainstone-file-dialog");
         thread.setDaemon(true);
         thread.start();
+    }
+
+    private void handlePickResult(Minecraft client, Path inbox, OggFilePicker.Result result) {
+        if (result.outcome() == OggFilePicker.Outcome.SELECTED) {
+            SpeakerUploader.start(client, this.pos, result.files());
+            return;
+        }
+        if (result.outcome() == OggFilePicker.Outcome.UNAVAILABLE) {
+            // Linux 上 AWT 可能整个不可用（精简 JRE、headless、Flatpak 沙箱……），
+            // 这时不开系统框了，直接进游戏内文件浏览器 喵
+            info(client, Component.translatable("message.explainstone.import.dialog_failed", inbox.toString()));
+            this.openInGamePicker(client, inbox);
+            return;
+        }
+        // 用户取消：保留“把 ogg 丢进 inbox 再点导入”的退路 喵
+        List<Path> files = listInbox(inbox);
+        if (!files.isEmpty()) {
+            SpeakerUploader.start(client, this.pos, files);
+            info(client, Component.translatable("message.explainstone.import.queued", files.size()));
+        } else {
+            info(client, Component.translatable("message.explainstone.import.none", inbox.toString()));
+        }
+    }
+
+    /** 系统文件框不可用时的退路：用游戏自己画的界面挑文件 喵 */
+    private void openInGamePicker(Minecraft client, Path inbox) {
+        if (client.level == null) {
+            return;
+        }
+        client.setScreen(new OggPickerScreen(this, inbox,
+                paths -> SpeakerUploader.start(client, this.pos, paths)));
     }
 
     private static List<Path> listInbox(Path inbox) {

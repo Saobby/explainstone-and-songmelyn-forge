@@ -23,6 +23,15 @@ Port of the Fabric 1.21.1 edition of **Explainstone / Songmelyn / Broadcast Tran
 * Import limits are configurable: 10 MB / 10 minutes / 500 tracks per playlist by default.
   The server also re-checks the SHA-1, enforces interaction distance, assembles chunks by
   index and expires abandoned partial uploads.
+* The import picker uses the desktop's native dialog when one is available — `zenity` /
+  `qarma` / `kdialog` on Linux (KDE sessions prefer `kdialog`, others prefer `zenity`),
+  AWT `FileDialog` elsewhere — and always forces the dialog on top of the fullscreen game
+  window. If no system dialog can be created at all (headless JRE without `libawt_xawt.so`,
+  Flatpak sandbox, `-Djava.awt.headless=true`, …), the mod switches to an in-game file
+  browser: click folders to navigate, click `.ogg` files to select them (the selection
+  survives folder changes), then press *Import*. Failures are logged under
+  `explainstone-picker` and `.ogg` files dropped into `config/explainstone/inbox` are still
+  imported when the dialog is cancelled.
 * The screen includes delete-all, current-track display and a separate progress row so the
   time/progress text no longer overlaps the playlist.
 * Client-side OpenAL playback engine, independent of resource packs.
