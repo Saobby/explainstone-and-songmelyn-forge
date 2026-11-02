@@ -32,6 +32,7 @@ import net.minecraftforge.event.TickEvent;
 import net.minecraftforge.eventbus.api.IEventBus;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraftforge.fml.DistExecutor;
+import net.minecraftforge.fml.ModLoadingContext;
 import net.minecraftforge.fml.common.Mod;
 import net.minecraftforge.fml.config.ModConfig;
 import net.minecraftforge.fml.javafmlmod.FMLJavaModLoadingContext;
@@ -49,8 +50,21 @@ public class Explainstone {
 	/** 每 5 秒清理一次超时的分块上传 喵 */
 	private int uploadCleanupTicker;
 
-	public Explainstone(FMLJavaModLoadingContext context) {
-		IEventBus modEventBus = context.getModEventBus();
+	/**
+	 * 主类用「无参构造 + 静态方法取上下文」，不要写成
+	 * {@code Explainstone(FMLJavaModLoadingContext context)} 喵。
+	 *
+	 * Forge 1.20.1 的构造器参数注入要到 47.3.10 才支持；47.0 ~ 47.3.9（例如 47.2.20）
+	 * 的 FMLModContainer 只会 getDeclaredConstructor() 找无参构造，带参构造会让整个模组
+	 * 在加载阶段抛 NoSuchMethodException。无参构造在所有 47.x 上都能用。 喵
+	 *
+	 * 另外注意：47.2.x 的 FMLJavaModLoadingContext 还不是 ModLoadingContext 的子类，
+	 * 它上面没有 registerConfig；配置注册必须走 ModLoadingContext.get() 才通吃 47.x。 喵
+	 */
+	@SuppressWarnings("removal")
+	public Explainstone() {
+		IEventBus modEventBus = FMLJavaModLoadingContext.get().getModEventBus();
+		ModLoadingContext context = ModLoadingContext.get();
 
 		// 打印一句欢迎语喵
 		LOGGER.info("Hello Forge world!");
