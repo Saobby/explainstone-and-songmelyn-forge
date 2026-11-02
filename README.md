@@ -87,6 +87,21 @@ Port of the Fabric 1.21.1 edition of **Explainstone / Songmelyn / Broadcast Tran
 
 The mod jar is written to `build/libs/explainstone-<version>.jar`.
 
+### CI
+
+`.github/workflows/build.yml` builds the mod on GitHub Actions:
+
+* pushes to `master`, pull requests against `master`, and manual runs
+  (`Run workflow` on the Actions tab) produce a downloadable artifact
+  `explainstone-<mod_version>` containing the mod jar;
+* pushing a tag such as `v1.0.7-beta` additionally creates a GitHub Release with
+  that jar attached (an existing release for the tag is updated in place).
+
+```bash
+git tag v1.0.7-beta
+git push origin v1.0.7-beta
+```
+
 ## Run
 
 ```bash
