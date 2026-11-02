@@ -35,6 +35,7 @@ import net.minecraftforge.fml.DistExecutor;
 import net.minecraftforge.fml.common.Mod;
 import net.minecraftforge.fml.config.ModConfig;
 import net.minecraftforge.fml.javafmlmod.FMLJavaModLoadingContext;
+import net.minecraftforge.fml.loading.FMLEnvironment;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -60,8 +61,11 @@ public class Explainstone {
 		// 网络包 + 服务端处理器（界面操作、音频导入/下发） 喵
 		SpeakerNetworking.register();
 
-		// 配置文件：config/explainstone-common.toml 喵
-		context.registerConfig(ModConfig.Type.COMMON, ExplainstoneConfig.SPEC);
+		// 配置文件分两份：服务端（世界级、会同步给客户端）+ 客户端（只影响本机听觉与界面） 喵
+		context.registerConfig(ModConfig.Type.SERVER, ExplainstoneServerConfig.SPEC);
+		if (FMLEnvironment.dist.isClient()) {
+			context.registerConfig(ModConfig.Type.CLIENT, ExplainstoneClientConfig.SPEC);
+		}
 
 		// 所有变体都放进创造模式物品栏的「红石」栏 喵
 		modEventBus.addListener(this::addCreative);

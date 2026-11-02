@@ -12,7 +12,7 @@
  */
 package com.ginka.explainstone.speaker;
 
-import com.ginka.explainstone.ExplainstoneConfig;
+import com.ginka.explainstone.ExplainstoneServerConfig;
 import com.ginka.explainstone.ModBlocks;
 import net.minecraft.core.BlockPos;
 import net.minecraft.nbt.CompoundTag;
@@ -108,7 +108,7 @@ public class SpeakerBlockEntity extends BlockEntity {
         if (tracks == null || tracks.isEmpty()) {
             return 0;
         }
-        int max = ExplainstoneConfig.maxPlaylistTracks();
+        int max = ExplainstoneServerConfig.maxPlaylistTracks();
         long encoded = PlaybackRegistry.encodedLength(this.tracks);
         int added = 0;
         for (Track track : tracks) {
@@ -300,7 +300,7 @@ public class SpeakerBlockEntity extends BlockEntity {
 
     /** 实际可闻距离 = 配置的满音量范围 × 当前音量 喵 */
     public double getEffectiveAudibleRange() {
-        return ExplainstoneConfig.audibleRangeAtFullVolume() * (this.volume / 100.0);
+        return ExplainstoneServerConfig.audibleRangeAtFullVolume() * (this.volume / 100.0);
     }
 
     /**
@@ -314,7 +314,7 @@ public class SpeakerBlockEntity extends BlockEntity {
 
     /** 收信时的实际可闻距离：和实际音量一起按比例缩放 喵 */
     public double getEffectiveAudibleRange(int broadcastVolumePercent) {
-        return ExplainstoneConfig.audibleRangeAtFullVolume()
+        return ExplainstoneServerConfig.audibleRangeAtFullVolume()
                 * (this.getEffectiveVolume(broadcastVolumePercent) / 100.0);
     }
 
@@ -410,7 +410,7 @@ public class SpeakerBlockEntity extends BlockEntity {
         super.load(nbt);
         this.tracks.clear();
         ListTag list = nbt.getList("tracks", Tag.TAG_COMPOUND);
-        int limit = Math.max(1, ExplainstoneConfig.maxPlaylistTracks());
+        int limit = Math.max(1, ExplainstoneServerConfig.maxPlaylistTracks());
         for (int i = 0; i < list.size() && this.tracks.size() < limit; i++) {
             Track track = Track.fromNbt(list.getCompound(i));
             // 只接受能解析的曲目；file: 必须是合法 SHA-1（防止路径穿越 / 畸形存档） 喵

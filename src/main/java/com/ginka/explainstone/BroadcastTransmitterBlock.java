@@ -91,7 +91,7 @@ public class BroadcastTransmitterBlock extends Block implements EntityBlock {
             be.setLastPowered(powered);
             if (edge && be.isRespectRedstone() && state.getValue(PLAYING) != powered
                     // 配置要求 OP 才能开播时，红石不能被用来绕过权限（停止广播仍然允许） 喵
-                    && !(powered && ExplainstoneConfig.broadcastRequiresOp())) {
+                    && !(powered && ExplainstoneServerConfig.broadcastRequiresOp())) {
                 if (powered) {
                     // 红石重新开播时清掉用户暂停状态 喵
                     be.setPaused(false);

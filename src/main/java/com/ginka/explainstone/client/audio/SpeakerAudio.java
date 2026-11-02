@@ -13,7 +13,7 @@
 package com.ginka.explainstone.client.audio;
 
 import com.ginka.explainstone.BroadcastTransmitterBlock;
-import com.ginka.explainstone.ExplainstoneConfig;
+import com.ginka.explainstone.ExplainstoneClientConfig;
 import com.ginka.explainstone.SpeakerBlock;
 import com.ginka.explainstone.speaker.PlayMode;
 import com.ginka.explainstone.speaker.SpeakerBlockEntity;
@@ -1032,7 +1032,7 @@ public final class SpeakerAudio {
                         + dz * facing.getStepZ()) / distance;
                 dot = Math.max(-1.0, Math.min(1.0, dot));
                 double t = Math.max(0.0, Math.min(1.0, (dot + 1.0) * 0.5));
-                double rear = Math.max(0.0, Math.min(1.0, ExplainstoneConfig.rearVolumeFactor()));
+                double rear = Math.max(0.0, Math.min(1.0, ExplainstoneClientConfig.rearVolumeFactor()));
                 directionalGain = (float) (rear + (1.0 - rear) * t);
             }
 
@@ -1183,7 +1183,7 @@ public final class SpeakerAudio {
 
         /** 每 3 秒重建一次音响所在房间；房间参数属于音响，不随听者移动 喵 */
         private void updateRoom(ClientLevel world) {
-            if (!ExplainstoneConfig.reverbEnabled()) {
+            if (!ExplainstoneClientConfig.reverbEnabled()) {
                 this.room = null;
                 return;
             }
@@ -1203,7 +1203,7 @@ public final class SpeakerAudio {
             Vec3 source = new Vec3(this.pos.getX() + 0.5, this.pos.getY() + 0.5, this.pos.getZ() + 0.5);
             try {
                 this.room = RoomSampler.sample(world, source,
-                        ExplainstoneConfig.reverbMaxRoomDistance());
+                        ExplainstoneClientConfig.reverbMaxRoomDistance());
             } catch (Throwable t) {
                 this.room = null;
                 LOGGER.warn("房间混响采样失败: {}", t.toString());
@@ -1246,7 +1246,7 @@ public final class SpeakerAudio {
                 }
                 // 混响路径的遮挡比直达声宽松：保留一部分低频间接声 喵
                 float lenient = (float) Math.sqrt(clamp01(this.occlusionLow));
-                targetWet = clamp01((float) (ExplainstoneConfig.reverbWet()
+                targetWet = clamp01((float) (ExplainstoneClientConfig.reverbWet()
                         * (0.35 + 0.65 * lenient)));
             }
 
@@ -1310,9 +1310,9 @@ public final class SpeakerAudio {
                 EXTEfx.alEffectf(effect, EXTEfx.AL_REVERB_DENSITY, 1.0f);
                 EXTEfx.alEffectf(effect, EXTEfx.AL_REVERB_DIFFUSION, 1.0f);
                 EXTEfx.alEffectf(effect, EXTEfx.AL_REVERB_GAIN,
-                        clamp01((float) ExplainstoneConfig.reverbGain()));
+                        clamp01((float) ExplainstoneClientConfig.reverbGain()));
                 EXTEfx.alEffectf(effect, EXTEfx.AL_REVERB_GAINHF,
-                        clamp01((float) ExplainstoneConfig.reverbGainHF()));
+                        clamp01((float) ExplainstoneClientConfig.reverbGainHF()));
                 EXTEfx.alEffectf(effect, EXTEfx.AL_REVERB_DECAY_TIME,
                         clamp(rt, 0.1f, 20.0f));
                 EXTEfx.alEffectf(effect, EXTEfx.AL_REVERB_DECAY_HFRATIO,

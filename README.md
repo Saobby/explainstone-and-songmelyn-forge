@@ -143,45 +143,41 @@ git push origin v1.0.7-beta
 
 ## Config
 
-Forge config file: `config/explainstone-common.toml`
+Two separate Forge config files:
+
+| File | Type | Where | Holds |
+|---|---|---|---|
+| `explainstone-server.toml` | `SERVER` | single player: `saves/<world>/serverconfig/`, dedicated: `<server>/world/serverconfig/` | broadcast permissions, import limits, optimistic-import quotas, anti-abuse buckets, `audibleRangeAtFullVolume` |
+| `explainstone-client.toml` | `CLIENT` | `config/` | front/back attenuation, occlusion, reverb, which import file picker to use |
+
+The server file is owned by the server and **synced to clients on login**, so
+`audibleRangeAtFullVolume` no longer has to be kept in sync by hand. The client file only
+affects local listening and the import UI; it never changes the shared timeline.
+(The old `config/explainstone-common.toml` is no longer read — its values live in the two
+files above now.)
 
 ```toml
+# ---------------- explainstone-server.toml ----------------
 broadcastRequiresOp = false
 # When true, only operators (permission level 2) can start a broadcast. Redstone
 # power cannot start one in this mode either (it can still stop one).
-# Audible range in blocks at 100% volume. The effective range scales linearly
-# with volume; keep this value identical on client and server.
 audibleRangeAtFullVolume = 40
-# Volume multiplier directly behind a speaker (0.0 = silent, 1.0 = disabled).
-rearVolumeFactor = 0.25
-# Attenuate direct sound through blocks between the speaker and the listener.
-soundOcclusion = true
-# Room reverb for enclosed spaces.
-reverbEnabled = true
-# Maximum room sampling distance in blocks.
-reverbMaxRoomDistance = 48.0
-# EFX reverb effect gain / high-frequency gain, and wet return level.
-reverbGain = 0.3
-reverbGainHF = 0.8
-reverbWet = 0.8
-# Which file picker the "Import ogg…" button opens (client-side):
-# "system"  = native dialog first, in-game browser as fallback;
-# "in-game" = always use the in-game file browser.
-filePicker = "system"
+# Audible range in blocks at 100% volume, scaled linearly with volume.
+# Synced to clients automatically, so both sides always agree.
 # Imported ogg size limit in MiB (1-100).
 maxAudioFileMb = 10
 # Single-track duration limit in seconds (1-7200).
 maxAudioDurationSeconds = 600
 # Maximum number of tracks in one playlist (1-10000).
 maxPlaylistTracks = 500
-# --- Optimistic import limits (server-side) ---
+# --- Optimistic import limits ---
 # How many "metadata added, bytes not uploaded yet" tracks one player may hold at once.
 pendingImportsPerPlayer = 500
 # Seconds a pending entry survives without its bytes; then it is removed from the playlist.
 pendingImportTimeoutSeconds = 120
 # Cooldown in seconds after a failed upload validation (0 disables it).
 importFailureCooldownSeconds = 60
-# --- Server-side anti-abuse limits (defaults are generous for normal play) ---
+# --- Anti-abuse limits (defaults are generous for normal play) ---
 # Simultaneous chunked imports per player / on the whole server, and the total
 # memory budget for incomplete uploads in MiB.
 maxUploadsPerPlayer = 4
@@ -198,10 +194,30 @@ audioDownloadBurstMb = 128
 audioDownloadMbPerSecond = 8
 ```
 
-Keep the three import-limit values identical on the client and the server: the client
-checks file size while preparing an upload, hashes the files, probes the duration and submits
-the metadata; the server enforces pending-entry quotas, and then enforces size, SHA-1,
-duration and playlist length for the bytes that do need uploading. Incomplete multi-chunk
+```toml
+# ---------------- explainstone-client.toml ----------------
+# Volume multiplier directly behind a speaker (0.0 = silent, 1.0 = disabled).
+rearVolumeFactor = 0.25
+# Attenuate direct sound through blocks between the speaker and the listener.
+soundOcclusion = true
+# Room reverb for enclosed spaces.
+reverbEnabled = true
+# Maximum room sampling distance in blocks.
+reverbMaxRoomDistance = 48.0
+# EFX reverb effect gain / high-frequency gain, and wet return level.
+reverbGain = 0.3
+reverbGainHF = 0.8
+reverbWet = 0.8
+# Which file picker the "Import ogg…" button opens:
+# "system"  = native dialog first, in-game browser as fallback;
+# "in-game" = always use the in-game file browser.
+filePicker = "system"
+```
+
+The client pre-checks the import limits it receives from the server: it checks file size,
+hashes the files, probes the duration and submits the metadata; the server enforces
+pending-entry quotas, and then enforces size, SHA-1, duration and playlist length for the
+bytes that do need uploading. Incomplete multi-chunk
 uploads are dropped after two minutes without a new chunk, when the player logs out, or when the
 server stops. Pending entries whose bytes never arrive are removed again after
 `pendingImportTimeoutSeconds`, and entries that still reference missing files are pruned from

@@ -12,7 +12,7 @@
  */
 package com.ginka.explainstone.client.audio;
 
-import com.ginka.explainstone.ExplainstoneConfig;
+import com.ginka.explainstone.ExplainstoneClientConfig;
 import com.ginka.explainstone.sound.SoundMaterial;
 import com.ginka.explainstone.sound.SoundMaterials;
 import net.minecraft.client.multiplayer.ClientLevel;
@@ -39,7 +39,7 @@ public final class AcousticRaycast {
     }
 
     public static Occlusion sample(ClientLevel level, Vec3 from, Vec3 to) {
-        if (!ExplainstoneConfig.soundOcclusion()) {
+        if (!ExplainstoneClientConfig.soundOcclusion()) {
             return Occlusion.NONE;
         }
         double dx = to.x - from.x;

@@ -14,10 +14,15 @@ package com.ginka.explainstone;
 
 import net.minecraftforge.common.ForgeConfigSpec;
 
-import java.util.List;
-
-/** 简易配置：config/explainstone-common.toml 喵 */
-public final class ExplainstoneConfig {
+/**
+ * 服务端配置（{@link net.minecraftforge.fml.config.ModConfig.Type#SERVER}）。
+ *
+ * <p>文件位置：单人存档 {@code saves/<存档>/serverconfig/explainstone-server.toml}，
+ * 专用服务器 {@code <服务端目录>/world/serverconfig/explainstone-server.toml}。
+ * 这份配置由服务端持有，玩家连进来时会自动同步到客户端，所以
+ * {@code audibleRangeAtFullVolume} 这类"两边必须一致"的值放这里最安全。 喵
+ */
+public final class ExplainstoneServerConfig {
     private static final ForgeConfigSpec.Builder BUILDER = new ForgeConfigSpec.Builder();
 
     /** 广播是否只允许 OP（默认 false，谁都能广播） 喵 */
@@ -28,73 +33,33 @@ public final class ExplainstoneConfig {
 
     /**
      * 100% 音量时的可闻距离（格）。
-     * 实际距离 = 该值 × 音量百分比；例如音量 50% 时范围减半 喵
+     * 实际距离 = 该值 × 音量百分比；例如音量 50% 时范围减半。
+     * 这是服务端配置，会自动同步给客户端，两边不会再对不上 喵
      */
     public static final ForgeConfigSpec.IntValue AUDIBLE_RANGE_AT_FULL_VOLUME = BUILDER
             .comment("Audible range in blocks at 100% volume.",
                     "The effective range scales linearly with volume (50% volume = half the range).",
-                    "Keep this value identical on the client and the server.")
+                    "Synced to clients automatically, so both sides always agree.")
             .defineInRange("audibleRangeAtFullVolume", 40, 8, 256);
 
-    /**
-     * 站在音响正后方时的音量倍率（0.0 = 完全听不到，1.0 = 关闭前后方向衰减）。
-     * 侧面在 1.0 与该值之间线性过渡。只影响客户端播放音量，不影响全服时间轴 喵
-     */
-    public static final ForgeConfigSpec.DoubleValue REAR_VOLUME_FACTOR = BUILDER
-            .comment("Volume multiplier when the listener is directly behind a speaker.",
-                    "0.0 = silent behind, 1.0 = no front/back attenuation.",
-                    "Sides interpolate smoothly between front (1.0) and rear.",
-                    "Client-side only; it does not affect playback synchronization.")
-            .defineInRange("rearVolumeFactor", 0.25, 0.0, 1.0);
+    /** 单个导入音频文件大小上限（MB） 喵 */
+    public static final ForgeConfigSpec.IntValue MAX_AUDIO_FILE_MB = BUILDER
+            .comment("Maximum size of an imported ogg file in MiB.",
+                    "The client pre-checks it and the server enforces it again.")
+            .defineInRange("maxAudioFileMb", 10, 1, 100);
 
-    /** 是否启用直达声遮挡（墙壁会减弱声音） 喵 */
-    public static final ForgeConfigSpec.BooleanValue SOUND_OCCLUSION = BUILDER
-            .comment("Attenuate direct sound when blocks are between a speaker and the listener.",
-                    "High frequencies are reduced more than low frequencies when OpenAL EFX is available.",
-                    "Client-side effect; does not affect playback synchronization.")
-            .define("soundOcclusion", true);
+    /** 单曲最大时长（秒） 喵 */
+    public static final ForgeConfigSpec.IntValue MAX_AUDIO_DURATION_SECONDS = BUILDER
+            .comment("Maximum duration of a single imported track in seconds.",
+                    "Also the upper bound for the duration hint a client may submit.")
+            .defineInRange("maxAudioDurationSeconds", 600, 1, 7200);
 
-    /** 是否启用房间混响 喵 */
-    public static final ForgeConfigSpec.BooleanValue REVERB_ENABLED = BUILDER
-            .comment("Enable room reverb for speakers inside an enclosed room.",
-                    "The room acoustics are estimated on the client from the blocks around each speaker.",
-                    "Client-side effect; it does not affect playback synchronization.")
-            .define("reverbEnabled", true);
+    /** 播放列表最大曲目数 喵 */
+    public static final ForgeConfigSpec.IntValue MAX_PLAYLIST_TRACKS = BUILDER
+            .comment("Maximum number of tracks in one speaker/transmitter playlist.")
+            .defineInRange("maxPlaylistTracks", 500, 1, 10000);
 
-    /** 房间采样射线的最大距离（格） 喵 */
-    public static final ForgeConfigSpec.DoubleValue REVERB_MAX_ROOM_DISTANCE = BUILDER
-            .comment("Maximum distance used when sampling the room around a speaker.",
-                    "Rooms larger than this may be treated as open/outdoor and get no reverb.")
-            .defineInRange("reverbMaxRoomDistance", 48.0, 8.0, 128.0);
-
-    /** EFX Reverb 效果器总增益 喵 */
-    public static final ForgeConfigSpec.DoubleValue REVERB_GAIN = BUILDER
-            .comment("EFX reverb effect gain (0.0 - 1.0).")
-            .defineInRange("reverbGain", 0.3, 0.0, 1.0);
-
-    /** EFX Reverb 高频增益 喵 */
-    public static final ForgeConfigSpec.DoubleValue REVERB_GAIN_HF = BUILDER
-            .comment("EFX reverb high-frequency gain (0.0 - 1.0).")
-            .defineInRange("reverbGainHF", 0.8, 0.0, 1.0);
-
-    /** EFX 辅助发送的湿声增益 喵 */
-    public static final ForgeConfigSpec.DoubleValue REVERB_WET = BUILDER
-            .comment("Wet return level for the reverb auxiliary send (0.0 - 1.0).")
-            .defineInRange("reverbWet", 0.8, 0.0, 1.0);
-
-    /**
-     * 导入音频时默认用哪种文件选择框。
-     * system  = 系统原生对话框（Linux 上 zenity/qarma/kdialog，其它平台 AWT），开不出来就自动退到游戏内浏览器；
-     * in-game = 直接用游戏内文件浏览器（方便在任意平台测试它） 喵
-     */
-    public static final ForgeConfigSpec.ConfigValue<String> FILE_PICKER = BUILDER
-            .comment("Which file picker the \"Import ogg…\" button opens.",
-                    "system  - the desktop's native dialog (zenity/qarma/kdialog on Linux, AWT elsewhere).",
-                    "          If no system dialog can be created, the in-game file browser is used instead.",
-                    "in-game - always use the in-game file browser (handy for testing on any platform).",
-                    "Values: system, in-game. Client-side only.")
-            .defineInList("filePicker", "system", List.of("system", "in-game"));
-
+    // ------------------------------------------------------------ 乐观导入的配额 喵
     /**
      * 每个玩家最多同时占多少条"元数据已进列表、字节还没到"的待上传曲目。
      * 这是乐观导入的代价上限：防止有人只发元数据就把别人的播放列表塞满。 喵
@@ -116,25 +81,6 @@ public final class ExplainstoneConfig {
             .comment("Cooldown in seconds after a failed upload validation (bad sha1 / not ogg / too long).",
                     "0 disables the cooldown.")
             .defineInRange("importFailureCooldownSeconds", 60, 0, 3600);
-
-    /** 单个导入音频文件大小上限（MB） 喵 */
-    public static final ForgeConfigSpec.IntValue MAX_AUDIO_FILE_MB = BUILDER
-            .comment("Maximum size of an imported ogg file in MiB.",
-                    "Keep this value identical on the client and the server.")
-            .defineInRange("maxAudioFileMb", 10, 1, 100);
-
-    /** 单曲最大时长（秒） 喵 */
-    public static final ForgeConfigSpec.IntValue MAX_AUDIO_DURATION_SECONDS = BUILDER
-            .comment("Maximum duration of a single imported track in seconds.",
-                    "Keep this value identical on the client and the server.")
-            .defineInRange("maxAudioDurationSeconds", 600, 1, 7200);
-
-    /** 播放列表最大曲目数 喵 */
-    public static final ForgeConfigSpec.IntValue MAX_PLAYLIST_TRACKS = BUILDER
-            .comment("Maximum number of tracks in one speaker/transmitter playlist.",
-                    "Keep this value identical on the client and the server.")
-            .defineInRange("maxPlaylistTracks", 500, 1, 10000);
-
     // ------------------------------------------------------------ 服务器限速 / 抗滥用 喵
     /** 每个玩家同时进行的导入上传数 喵 */
     public static final ForgeConfigSpec.IntValue MAX_UPLOADS_PER_PLAYER = BUILDER
@@ -180,7 +126,7 @@ public final class ExplainstoneConfig {
 
     public static final ForgeConfigSpec SPEC = BUILDER.build();
 
-    private ExplainstoneConfig() {
+    private ExplainstoneServerConfig() {
     }
 
     /** 广播是否只允许 OP（默认 false，谁都能广播） 喵 */
@@ -190,68 +136,12 @@ public final class ExplainstoneConfig {
 
     /** 100% 音量时的可闻距离（格） 喵 */
     public static int audibleRangeAtFullVolume() {
-        return AUDIBLE_RANGE_AT_FULL_VOLUME.get();
-    }
-
-    /** 正后方音量倍率 喵 */
-    public static double rearVolumeFactor() {
-        return REAR_VOLUME_FACTOR.get();
-    }
-
-    /** 是否启用墙壁遮挡衰减 喵 */
-    public static boolean soundOcclusion() {
-        return SOUND_OCCLUSION.get();
-    }
-
-    /** 是否启用房间混响 喵 */
-    public static boolean reverbEnabled() {
-        return REVERB_ENABLED.get();
-    }
-
-    /** 房间采样最大距离 喵 */
-    public static double reverbMaxRoomDistance() {
-        return REVERB_MAX_ROOM_DISTANCE.get();
-    }
-
-    /** EFX Reverb 总增益 喵 */
-    public static double reverbGain() {
-        return REVERB_GAIN.get();
-    }
-
-    /** EFX Reverb 高频增益 喵 */
-    public static double reverbGainHF() {
-        return REVERB_GAIN_HF.get();
-    }
-
-    /** 导入按钮是否直接用游戏内文件浏览器（而不是系统原生对话框） 喵 */
-    public static boolean useInGameFilePicker() {
         try {
-            String value = FILE_PICKER.get();
-            return value != null && "in-game".equalsIgnoreCase(value.trim());
+            return AUDIBLE_RANGE_AT_FULL_VOLUME.get();
         } catch (RuntimeException e) {
-            // 配置还没加载/被改坏时按默认的 system 走 喵
-            return false;
+            // 服务端配置还没同步到客户端（正常不会发生）时给个安全默认值，别让渲染线程崩 喵
+            return 40;
         }
-    }
-
-    /** 每个玩家同时可占的待上传条目数 喵 */
-    public static int pendingImportsPerPlayer() {
-        return PENDING_IMPORTS_PER_PLAYER.get();
-    }
-
-    /** 待上传条目的存活时间（秒） 喵 */
-    public static int pendingImportTimeoutSeconds() {
-        return PENDING_IMPORT_TIMEOUT_SECONDS.get();
-    }
-
-    /** 校验失败后的冷却时间（秒） 喵 */
-    public static int importFailureCooldownSeconds() {
-        return IMPORT_FAILURE_COOLDOWN_SECONDS.get();
-    }
-
-    /** 混响湿声增益 喵 */
-    public static double reverbWet() {
-        return REVERB_WET.get();
     }
 
     /** 单个导入文件最大字节数 喵 */
@@ -272,6 +162,21 @@ public final class ExplainstoneConfig {
     /** 播放列表最大曲目数 喵 */
     public static int maxPlaylistTracks() {
         return MAX_PLAYLIST_TRACKS.get();
+    }
+
+    /** 每玩家同时可占的待上传条目数 喵 */
+    public static int pendingImportsPerPlayer() {
+        return PENDING_IMPORTS_PER_PLAYER.get();
+    }
+
+    /** 待上传条目的存活时间（秒） 喵 */
+    public static int pendingImportTimeoutSeconds() {
+        return PENDING_IMPORT_TIMEOUT_SECONDS.get();
+    }
+
+    /** 校验失败后的冷却时间（秒） 喵 */
+    public static int importFailureCooldownSeconds() {
+        return IMPORT_FAILURE_COOLDOWN_SECONDS.get();
     }
 
     /** 每玩家同时进行的上传数 喵 */
@@ -299,12 +204,12 @@ public final class ExplainstoneConfig {
         return ACTION_REFILL_PER_SECOND.get();
     }
 
-    /** 音频下载请求突发容量 喵 */
+    /** 音频请求突发容量 喵 */
     public static double audioRequestBurst() {
         return AUDIO_REQUEST_BURST.get();
     }
 
-    /** 音频下载请求每秒回填 喵 */
+    /** 音频请求每秒回填 喵 */
     public static double audioRequestRefillPerSecond() {
         return AUDIO_REQUEST_REFILL_PER_SECOND.get();
     }

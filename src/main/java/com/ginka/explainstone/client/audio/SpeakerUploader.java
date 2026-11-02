@@ -12,7 +12,7 @@
  */
 package com.ginka.explainstone.client.audio;
 
-import com.ginka.explainstone.ExplainstoneConfig;
+import com.ginka.explainstone.ExplainstoneServerConfig;
 import com.ginka.explainstone.speaker.OggUtil;
 import com.ginka.explainstone.speaker.SpeakerNetworking;
 import com.ginka.explainstone.speaker.SpeakerPayloads;
@@ -166,8 +166,8 @@ public final class SpeakerUploader {
                         return;
                     }
                     long size = safeSize(path);
-                    if (size <= 0 || size > ExplainstoneConfig.maxAudioFileBytes()) {
-                        error("message.explainstone.import.too_large", ExplainstoneConfig.maxAudioFileMb());
+                    if (size <= 0 || size > ExplainstoneServerConfig.maxAudioFileBytes()) {
+                        error("message.explainstone.import.too_large", ExplainstoneServerConfig.maxAudioFileMb());
                         this.processedBytes += Math.max(0L, size);
                         this.uploadedBytes += Math.max(0L, size);
                         continue;
@@ -332,8 +332,8 @@ public final class SpeakerUploader {
                     digest.update(buffer, 0, n);
                     read += n;
                     this.currentRead = read;
-                    if (read > ExplainstoneConfig.maxAudioFileBytes()) {
-                        error("message.explainstone.import.too_large", ExplainstoneConfig.maxAudioFileMb());
+                    if (read > ExplainstoneServerConfig.maxAudioFileBytes()) {
+                        error("message.explainstone.import.too_large", ExplainstoneServerConfig.maxAudioFileMb());
                         return null;
                     }
                 }
@@ -369,8 +369,8 @@ public final class SpeakerUploader {
         private byte[] readVerified(Scanned item) {
             try {
                 byte[] bytes = Files.readAllBytes(item.path());
-                if (bytes.length > ExplainstoneConfig.maxAudioFileBytes()) {
-                    error("message.explainstone.import.too_large", ExplainstoneConfig.maxAudioFileMb());
+                if (bytes.length > ExplainstoneServerConfig.maxAudioFileBytes()) {
+                    error("message.explainstone.import.too_large", ExplainstoneServerConfig.maxAudioFileMb());
                     return null;
                 }
                 if (!isOgg(bytes)) {

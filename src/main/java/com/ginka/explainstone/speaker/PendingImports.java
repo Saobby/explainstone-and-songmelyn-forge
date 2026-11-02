@@ -12,7 +12,7 @@
  */
 package com.ginka.explainstone.speaker;
 
-import com.ginka.explainstone.ExplainstoneConfig;
+import com.ginka.explainstone.ExplainstoneServerConfig;
 import net.minecraft.core.BlockPos;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.server.MinecraftServer;
@@ -86,7 +86,7 @@ public final class PendingImports {
 
     /** 校验失败后让这个玩家冷静一会儿，避免反复塞假条目 喵 */
     public static void enterCooldown(UUID owner) {
-        int seconds = ExplainstoneConfig.importFailureCooldownSeconds();
+        int seconds = ExplainstoneServerConfig.importFailureCooldownSeconds();
         if (owner != null && seconds > 0) {
             COOLDOWN_UNTIL.put(owner, System.currentTimeMillis() + seconds * 1000L);
         }
@@ -102,11 +102,11 @@ public final class PendingImports {
         if (existing != null) {
             return true;   // 已经登记过，不重复占配额 喵
         }
-        if (count(player.getUUID()) >= Math.max(1, ExplainstoneConfig.pendingImportsPerPlayer())) {
+        if (count(player.getUUID()) >= Math.max(1, ExplainstoneServerConfig.pendingImportsPerPlayer())) {
             return false;
         }
         long expiresAt = System.currentTimeMillis()
-                + Math.max(5, ExplainstoneConfig.pendingImportTimeoutSeconds()) * 1000L;
+                + Math.max(5, ExplainstoneServerConfig.pendingImportTimeoutSeconds()) * 1000L;
         PENDING.put(key, new Entry(player.getUUID(), expiresAt));
         return true;
     }

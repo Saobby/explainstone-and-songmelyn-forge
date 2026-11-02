@@ -13,7 +13,7 @@
 package com.ginka.explainstone.client;
 
 import com.ginka.explainstone.BroadcastTransmitterBlock;
-import com.ginka.explainstone.ExplainstoneConfig;
+import com.ginka.explainstone.ExplainstoneClientConfig;
 import com.ginka.explainstone.SongmelynBlock;
 import com.ginka.explainstone.SpeakerBlock;
 import com.ginka.explainstone.client.audio.AudioSources;
@@ -707,7 +707,7 @@ public class SpeakerScreen extends Screen {
         }
         // 上次浏览过的目录优先；第一次打开时交给对话框/浏览器自己去用户主目录 喵
         Path startDir = OggFilePicker.lastDirOr(null);
-        if (ExplainstoneConfig.useInGameFilePicker()) {
+        if (ExplainstoneClientConfig.useInGameFilePicker()) {
             this.openInGamePicker(client, startDir);
             return;
         }
