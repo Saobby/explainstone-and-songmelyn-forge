@@ -93,14 +93,19 @@ jobs:
       - name: Create or update GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
+          # 这个 job 没有 checkout（只要产物），gh 无法从 git remote 推断仓库，
+          # 必须用 GH_REPO 显式指定，否则会报 "fatal: not a git repository"。 喵
+          GH_REPO: ${{ github.repository }}
           TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
+          echo "repo=$GH_REPO tag=$TAG"
           ls -l dist
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" dist/*.jar --clobber
+          if gh release view "$TAG" --repo "$GH_REPO" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/*.jar --repo "$GH_REPO" --clobber
           else
             gh release create "$TAG" dist/*.jar \
+              --repo "$GH_REPO" \
               --title "$TAG" \
               --generate-notes
           fi
