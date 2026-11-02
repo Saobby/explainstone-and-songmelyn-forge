@@ -181,4 +181,6 @@ server stops.
 * Source sets were merged into `src/main/java`; client-only classes are still kept in
   `com.ginka.explainstone.client` and are never loaded on a dedicated server.
 
-Author: GINKA_3L96WW1. Licensed under MPL-2.0.
+Author: GINKA_3L96WW1.  
+Original Repo: https://github.com/3L96WW1/explainstone-and-songmelyn/  
+Licensed under MPL-2.0.
