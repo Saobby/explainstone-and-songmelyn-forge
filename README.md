@@ -28,10 +28,16 @@ Port of the Fabric 1.21.1 edition of **Explainstone / Songmelyn / Broadcast Tran
   AWT `FileDialog` elsewhere — and always forces the dialog on top of the fullscreen game
   window. If no system dialog can be created at all (headless JRE without `libawt_xawt.so`,
   Flatpak sandbox, `-Djava.awt.headless=true`, …), the mod switches to an in-game file
-  browser: click folders to navigate, click `.ogg` files to select them (the selection
-  survives folder changes), then press *Import*. Failures are logged under
-  `explainstone-picker` and `.ogg` files dropped into `config/explainstone/inbox` are still
-  imported when the dialog is cancelled.
+  browser instead, so importing never depends on the desktop at all. Cancelling the dialog
+  simply does nothing; there is no hidden fallback directory. Failures are logged under
+  `explainstone-picker`.
+* The in-game file browser starts in the last folder you used: click folders to navigate,
+  click `.ogg` files to toggle them, use *Select all* / *Clear all* / *Invert* for bulk
+  selection, and press *Import*. The selection survives folder changes, so files can be
+  gathered from several folders in one go.
+* `filePicker = "system"` (default) picks the system dialog with the in-game browser as a
+  fallback, `filePicker = "in-game"` always opens the in-game browser — handy for trying it
+  out on Windows/macOS where the native dialog normally works.
 * The screen includes delete-all, current-track display and a separate progress row so the
   time/progress text no longer overlaps the playlist.
 * Client-side OpenAL playback engine, independent of resource packs.
@@ -141,6 +147,10 @@ reverbMaxRoomDistance = 48.0
 reverbGain = 0.3
 reverbGainHF = 0.8
 reverbWet = 0.8
+# Which file picker the "Import ogg…" button opens (client-side):
+# "system"  = native dialog first, in-game browser as fallback;
+# "in-game" = always use the in-game file browser.
+filePicker = "system"
 # Imported ogg size limit in MiB (1-100).
 maxAudioFileMb = 10
 # Single-track duration limit in seconds (1-7200).

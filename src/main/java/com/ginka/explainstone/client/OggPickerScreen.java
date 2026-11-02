@@ -48,8 +48,6 @@ public class OggPickerScreen extends Screen {
     private static final int ROW_H = 12;
     private static final int BTN_H = 20;
     private static final int PANEL_W = 320;
-    /** 记住上次浏览到的目录，下次打开直接从那开始 喵 */
-    private static Path lastDir;
     /** 列目录放到后台线程：网络盘/大文件夹不会卡住渲染线程 喵 */
     private static final ExecutorService LISTER = Executors.newSingleThreadExecutor(task -> {
         Thread thread = new Thread(task, "explainstone-picker-list");
@@ -77,8 +75,12 @@ public class OggPickerScreen extends Screen {
     private int listTop;
     private int listBottom;
     private int hintY;
+    private int selectY;
     private int upY;
     private int importY;
+    private Button selectAllButton;
+    private Button selectNoneButton;
+    private Button invertButton;
     private Button importButton;
 
     public OggPickerScreen(Screen parent, Path startDir, Consumer<List<Path>> onPick) {
@@ -96,12 +98,22 @@ public class OggPickerScreen extends Screen {
         this.left = (this.width - this.panelW) / 2;
         this.pathY = 20;
         this.importY = this.height - 6 - BTN_H;
-        this.upY = this.importY - 4 - BTN_H;
+        this.selectY = this.importY - 4 - BTN_H;
+        this.upY = this.selectY - 4 - BTN_H;
         this.hintY = this.upY - 12;
         this.listTop = this.pathY + 12;
         this.listBottom = Math.max(this.listTop + ROW_H, this.hintY - 2);
 
         int third = Math.max(50, (this.panelW - 8) / 3);
+        this.selectAllButton = this.addRenderableWidget(
+                Button.builder(Component.translatable("screen.explainstone.picker.select_all"), b -> this.selectAll())
+                        .bounds(this.left, this.selectY, third, BTN_H).build());
+        this.selectNoneButton = this.addRenderableWidget(
+                Button.builder(Component.translatable("screen.explainstone.picker.select_none"), b -> this.selectNone())
+                        .bounds(this.left + third + 4, this.selectY, third, BTN_H).build());
+        this.invertButton = this.addRenderableWidget(
+                Button.builder(Component.translatable("screen.explainstone.picker.invert"), b -> this.invertSelection())
+                        .bounds(this.left + (third + 4) * 2, this.selectY, third, BTN_H).build());
         this.addRenderableWidget(Button.builder(Component.translatable("screen.explainstone.picker.up"),
                         b -> this.navigateParent())
                 .bounds(this.left, this.upY, third, BTN_H).build());
@@ -123,10 +135,11 @@ public class OggPickerScreen extends Screen {
         this.refreshButtons();
     }
 
-    /** 起始目录：上次浏览过的 → 传进来的（一般是 inbox）→ 用户主目录 喵 */
+    /** 起始目录：上次浏览过的 → 调用方给的 → 用户主目录 喵 */
     private Path resolveStartDir() {
-        if (lastDir != null && Files.isDirectory(lastDir)) {
-            return lastDir;
+        Path remembered = OggFilePicker.lastDirOr(null);
+        if (remembered != null && Files.isDirectory(remembered)) {
+            return remembered;
         }
         if (this.startDir != null && Files.isDirectory(this.startDir)) {
             return this.startDir;
@@ -171,7 +184,7 @@ public class OggPickerScreen extends Screen {
             return;
         }
         this.dir = absolute;
-        lastDir = absolute;
+        OggFilePicker.remember(absolute);
         this.scroll = 0;
         this.entries = List.of();
         this.error = null;
@@ -227,6 +240,41 @@ public class OggPickerScreen extends Screen {
         all.addAll(files);
         return new Listing(List.copyOf(all), null);
     }
+    // ---------------------------------------------------------------- 选择操作 喵
+
+    /** 当前文件夹里的所有 .ogg（不含子文件夹） 喵 */
+    private List<Path> currentOggs() {
+        List<Path> files = new ArrayList<>();
+        for (Entry entry : this.entries) {
+            if (!entry.directory()) {
+                files.add(entry.path());
+            }
+        }
+        return files;
+    }
+
+    /** 全选本文件夹里的 .ogg（其它文件夹已选中的保持不动） 喵 */
+    private void selectAll() {
+        this.selected.addAll(this.currentOggs());
+        this.refreshButtons();
+    }
+
+    /** 全部取消（包括别的文件夹里已经勾上的） 喵 */
+    private void selectNone() {
+        this.selected.clear();
+        this.refreshButtons();
+    }
+
+    /** 反选本文件夹里的 .ogg（其它文件夹已选中的保持不动） 喵 */
+    private void invertSelection() {
+        for (Path path : this.currentOggs()) {
+            if (!this.selected.remove(path)) {
+                this.selected.add(path);
+            }
+        }
+        this.refreshButtons();
+    }
+
     // ---------------------------------------------------------------- 渲染 喵
     @Override
     public void render(GuiGraphics context, int mouseX, int mouseY, float delta) {
@@ -324,6 +372,18 @@ public class OggPickerScreen extends Screen {
     }
 
     private void refreshButtons() {
+        boolean hasOggs = !this.entries.isEmpty() && this.entries.stream().anyMatch(entry -> !entry.directory());
+        boolean allSelected = hasOggs && this.selected.containsAll(this.currentOggs());
+        if (this.selectAllButton != null) {
+            // 本文件夹的 .ogg 已经全选上了就置灰，免得点了没反应 喵
+            this.selectAllButton.active = hasOggs && !allSelected;
+        }
+        if (this.selectNoneButton != null) {
+            this.selectNoneButton.active = !this.selected.isEmpty();
+        }
+        if (this.invertButton != null) {
+            this.invertButton.active = hasOggs;
+        }
         if (this.importButton == null) {
             return;
         }

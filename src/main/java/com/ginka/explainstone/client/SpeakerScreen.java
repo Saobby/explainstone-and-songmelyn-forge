@@ -13,6 +13,7 @@
 package com.ginka.explainstone.client;
 
 import com.ginka.explainstone.BroadcastTransmitterBlock;
+import com.ginka.explainstone.ExplainstoneConfig;
 import com.ginka.explainstone.SongmelynBlock;
 import com.ginka.explainstone.SpeakerBlock;
 import com.ginka.explainstone.client.audio.AudioSources;
@@ -32,13 +33,9 @@ import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.core.BlockPos;
 import net.minecraft.network.chat.Component;
 import net.minecraft.world.level.block.state.BlockState;
-import net.minecraftforge.fml.loading.FMLPaths;
 
-import java.io.IOException;
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
-import java.util.stream.Stream;
 
 /**
  * 讲解石 / 颂美铃 / 广播发信器 的交互界面。
@@ -695,71 +692,65 @@ public class SpeakerScreen extends Screen {
 
     /**
      * 导入按钮：
-     * 先开系统文件框（Linux 上优先 zenity/kdialog，其次 AWT）；
-     * 系统框彻底用不了时改成游戏内文件浏览器，保证任何平台都能导入 喵
+     * 默认开系统文件框（Linux 上优先 zenity/kdialog，其次 AWT），开不出来就切到游戏内文件浏览器；
+     * 配置项 filePicker = in-game 时直接用游戏内浏览器（方便测试） 喵
      */
     private void onImportClicked() {
-        Path inbox = FMLPaths.CONFIGDIR.get().resolve("explainstone").resolve("inbox");
-        try {
-            Files.createDirectories(inbox);
-        } catch (IOException ignored) {
+        Minecraft client = Minecraft.getInstance();
+        if (client.level == null) {
+            return;
+        }
+        // 上次浏览过的目录优先；第一次打开时交给对话框/浏览器自己去用户主目录 喵
+        Path startDir = OggFilePicker.lastDirOr(null);
+        if (ExplainstoneConfig.useInGameFilePicker()) {
+            this.openInGamePicker(client, startDir);
+            return;
         }
         if (this.pickerOpen) {
-            // 已经有一个选择框开着，别叠第二个 喵
+            // 已经有一个系统选择框开着，别叠第二个 喵
             return;
         }
         this.pickerOpen = true;
-        Minecraft client = Minecraft.getInstance();
         String title = Component.translatable("screen.explainstone.picker.title").getString();
         Thread thread = new Thread(() -> {
-            OggFilePicker.Result result = OggFilePicker.pick(inbox, title);
+            OggFilePicker.Result result = OggFilePicker.pick(startDir, title);
             client.execute(() -> {
                 this.pickerOpen = false;
-                this.handlePickResult(client, inbox, result);
+                this.handlePickResult(client, startDir, result);
             });
         }, "explainstone-file-dialog");
         thread.setDaemon(true);
         thread.start();
     }
 
-    private void handlePickResult(Minecraft client, Path inbox, OggFilePicker.Result result) {
-        if (result.outcome() == OggFilePicker.Outcome.SELECTED) {
-            SpeakerUploader.start(client, this.pos, result.files());
-            return;
-        }
-        if (result.outcome() == OggFilePicker.Outcome.UNAVAILABLE) {
-            // Linux 上 AWT 可能整个不可用（精简 JRE、headless、Flatpak 沙箱……），
-            // 这时不开系统框了，直接进游戏内文件浏览器 喵
-            info(client, Component.translatable("message.explainstone.import.dialog_failed", inbox.toString()));
-            this.openInGamePicker(client, inbox);
-            return;
-        }
-        // 用户取消：保留“把 ogg 丢进 inbox 再点导入”的退路 喵
-        List<Path> files = listInbox(inbox);
-        if (!files.isEmpty()) {
-            SpeakerUploader.start(client, this.pos, files);
-            info(client, Component.translatable("message.explainstone.import.queued", files.size()));
-        } else {
-            info(client, Component.translatable("message.explainstone.import.none", inbox.toString()));
+    private void handlePickResult(Minecraft client, Path startDir, OggFilePicker.Result result) {
+        switch (result.outcome()) {
+            case SELECTED -> {
+                OggFilePicker.remember(result.files().get(0));
+                SpeakerUploader.start(client, this.pos, result.files());
+            }
+            case UNAVAILABLE -> {
+                // 系统框整个不可用（精简 JRE、headless、Flatpak 沙箱……）：改用游戏内浏览器 喵
+                info(client, Component.translatable("message.explainstone.import.dialog_failed"));
+                this.openInGamePicker(client, startDir);
+            }
+            // 用户自己取消：什么都不做 喵
+            case CANCELLED -> {
+            }
         }
     }
 
-    /** 系统文件框不可用时的退路：用游戏自己画的界面挑文件 喵 */
-    private void openInGamePicker(Minecraft client, Path inbox) {
+    /** 用游戏自己画的界面挑文件（系统文件框不可用、或者配置指定用它时） 喵 */
+    private void openInGamePicker(Minecraft client, Path startDir) {
         if (client.level == null) {
             return;
         }
-        client.setScreen(new OggPickerScreen(this, inbox,
-                paths -> SpeakerUploader.start(client, this.pos, paths)));
-    }
-
-    private static List<Path> listInbox(Path inbox) {
-        try (Stream<Path> stream = Files.list(inbox)) {
-            return stream.filter(p -> p.getFileName().toString().toLowerCase().endsWith(".ogg"))
-                    .sorted().toList();
-        } catch (IOException e) {
-            return List.of();
-        }
+        client.setScreen(new OggPickerScreen(this, startDir, paths -> {
+            if (!paths.isEmpty()) {
+                OggFilePicker.remember(paths.get(0));
+                SpeakerUploader.start(client, this.pos, paths);
+            }
+        }));
     }
 
     private void info(Minecraft client, Component text) {

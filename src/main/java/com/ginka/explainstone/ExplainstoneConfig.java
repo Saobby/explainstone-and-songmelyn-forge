@@ -14,6 +14,8 @@ package com.ginka.explainstone;
 
 import net.minecraftforge.common.ForgeConfigSpec;
 
+import java.util.List;
+
 /** 简易配置：config/explainstone-common.toml 喵 */
 public final class ExplainstoneConfig {
     private static final ForgeConfigSpec.Builder BUILDER = new ForgeConfigSpec.Builder();
@@ -79,6 +81,19 @@ public final class ExplainstoneConfig {
     public static final ForgeConfigSpec.DoubleValue REVERB_WET = BUILDER
             .comment("Wet return level for the reverb auxiliary send (0.0 - 1.0).")
             .defineInRange("reverbWet", 0.8, 0.0, 1.0);
+
+    /**
+     * 导入音频时默认用哪种文件选择框。
+     * system  = 系统原生对话框（Linux 上 zenity/qarma/kdialog，其它平台 AWT），开不出来就自动退到游戏内浏览器；
+     * in-game = 直接用游戏内文件浏览器（方便在任意平台测试它） 喵
+     */
+    public static final ForgeConfigSpec.ConfigValue<String> FILE_PICKER = BUILDER
+            .comment("Which file picker the \"Import ogg…\" button opens.",
+                    "system  - the desktop's native dialog (zenity/qarma/kdialog on Linux, AWT elsewhere).",
+                    "          If no system dialog can be created, the in-game file browser is used instead.",
+                    "in-game - always use the in-game file browser (handy for testing on any platform).",
+                    "Values: system, in-game. Client-side only.")
+            .defineInList("filePicker", "system", List.of("system", "in-game"));
 
     /** 单个导入音频文件大小上限（MB） 喵 */
     public static final ForgeConfigSpec.IntValue MAX_AUDIO_FILE_MB = BUILDER
@@ -184,6 +199,17 @@ public final class ExplainstoneConfig {
     /** EFX Reverb 高频增益 喵 */
     public static double reverbGainHF() {
         return REVERB_GAIN_HF.get();
+    }
+
+    /** 导入按钮是否直接用游戏内文件浏览器（而不是系统原生对话框） 喵 */
+    public static boolean useInGameFilePicker() {
+        try {
+            String value = FILE_PICKER.get();
+            return value != null && "in-game".equalsIgnoreCase(value.trim());
+        } catch (RuntimeException e) {
+            // 配置还没加载/被改坏时按默认的 system 走 喵
+            return false;
+        }
     }
 
     /** 混响湿声增益 喵 */

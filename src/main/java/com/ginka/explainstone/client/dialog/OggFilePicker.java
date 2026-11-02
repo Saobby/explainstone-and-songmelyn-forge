@@ -63,6 +63,8 @@ public final class OggFilePicker {
     private static final Pattern LINE_SPLIT = Pattern.compile("\r?\n");
     /** PATH 里有没有某个可执行文件的缓存，免得每次点导入都扫一遍 PATH 喵 */
     private static final Map<String, Boolean> COMMAND_CACHE = new HashMap<>();
+    /** 上次选文件/浏览的目录；系统框和游戏内浏览器共用，下次打开直接从那开始 喵 */
+    private static volatile Path lastDir;
 
     private OggFilePicker() {
     }
@@ -107,6 +109,41 @@ public final class OggFilePicker {
         LOGGER.warn("没有可用的系统文件框（headless={}, java.awt.headless={}, os={}），改用游戏内文件浏览器",
                 isHeadless(), System.getProperty("java.awt.headless"), System.getProperty("os.name"));
         return Result.UNAVAILABLE;
+    }
+
+    // ------------------------------------------------------------ 起始目录 喵
+
+    /**
+     * 记住最近用过的目录（传文件或目录都行），下次打对话框/浏览器从这里开始 喵
+     */
+    public static void remember(Path path) {
+        if (path == null) {
+            return;
+        }
+        try {
+            Path dir = Files.isDirectory(path) ? path : path.getParent();
+            if (dir != null && Files.isDirectory(dir)) {
+                lastDir = dir.toAbsolutePath().normalize();
+            }
+        } catch (RuntimeException ignored) {
+            // 路径奇奇怪怪就算了，不影响导入 喵
+        }
+    }
+
+    /**
+     * 上次用过的目录；没有记录/记录已失效时返回 fallback 喵
+     */
+    public static Path lastDirOr(Path fallback) {
+        Path dir = lastDir;
+        if (dir != null) {
+            try {
+                if (Files.isDirectory(dir)) {
+                    return dir;
+                }
+            } catch (RuntimeException ignored) {
+            }
+        }
+        return fallback;
     }
 
     // ------------------------------------------------------------ Linux 原生对话框 喵
