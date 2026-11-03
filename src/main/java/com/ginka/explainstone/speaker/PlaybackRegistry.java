@@ -324,6 +324,31 @@ public final class PlaybackRegistry {
         }
     }
 
+    /**
+     * 上一曲 / 下一曲：把当前会话的时间轴整体平移一首，并立刻重发给附近玩家。
+     *
+     * <p>刻意不去改 selected：{@link #ensure} 把「选中曲目变了」当成换曲，会重建会话、
+     * 进度直接归零，刚切的那一首等于白发。切歌只动 {@link SessionTimeline}。
+     *
+     * @param direction 负数 = 上一曲，正数 = 下一曲 喵
+     * @return 是否真的移动了（没有会话 / 时长未知时 false，调用方可以退回到换选中项） 喵
+     */
+    public static boolean skip(ServerLevel level, BlockPos pos, int direction) {
+        Map<BlockPos, Session> map = ACTIVE.get(level.dimension());
+        if (map == null) {
+            return false;
+        }
+        Session session = map.get(pos);
+        if (session == null || !session.timeline.skipTrack(direction, level.getGameTime())) {
+            return false;
+        }
+        session.revision = ++REVISION;
+        sendNearby(level, pos, session);
+        LOGGER.info("playback session skip pos={} dir={} elapsed={} rev={}", pos.toShortString(),
+                direction, session.elapsedTicks(level), session.revision);
+        return true;
+    }
+
     /** 每 tick 由方块 ticker 调用：会话缺失就补，列表/模式变了就重开，每 5 秒重推一次 喵 */
     public static void tick(ServerLevel level, BlockPos pos, BlockState state, SpeakerBlockEntity be) {
         ensure(level, pos, be);

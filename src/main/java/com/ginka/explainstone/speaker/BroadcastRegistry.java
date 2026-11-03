@@ -239,6 +239,30 @@ public final class BroadcastRegistry {
         sendEntry(level, pos, entry);
     }
 
+    /**
+     * 上一曲 / 下一曲：把当前广播的时间轴整体平移一首，并立刻重推给信号范围内的收信端。
+     * 和讲解石一样只动 elapsed、不动 selected，避免 refresh() 把会话当成换曲重建。 喵
+     *
+     * @param direction 负数 = 上一曲，正数 = 下一曲 喵
+     * @return 是否真的移动了（没有广播会话 / 时长未知时 false） 喵
+     */
+    public static boolean skip(ServerLevel level, BlockPos pos, int direction) {
+        Map<BlockPos, Entry> map = ACTIVE.get(level.dimension());
+        if (map == null) {
+            return false;
+        }
+        Entry entry = map.get(pos);
+        if (entry == null || !entry.timeline.skipTrack(direction, level.getGameTime())) {
+            return false;
+        }
+        entry.revision = ++REVISION;
+        entry.lastSentMs = System.currentTimeMillis();
+        sendEntry(level, pos, entry);
+        LOGGER.info("broadcast session skip pos={} ch={} dir={} elapsed={} rev={}", pos.toShortString(),
+                entry.channel, direction, entry.elapsedTicks(level), entry.revision);
+        return true;
+    }
+
     /** 发信器被拆掉/被替换：撤销登记并通知附近玩家停播 喵 */
     public static void forget(ServerLevel level, BlockPos pos) {
         PlaybackPersistence.discard(level.dimension(), pos);

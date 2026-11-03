@@ -80,6 +80,14 @@ Port of the Fabric 1.21.1 edition of **Explainstone / Songmelyn / Broadcast Tran
   "· paused". Pressing play resumes from exactly that position with the same shuffled
   order. The separate stop button discards the pause point, so the next play starts from
   the selected track again.
+* **Previous / next** step the shared timeline by one track instead of rebuilding the
+  session: *next* adds the still-unplayed part of the current track, *previous* subtracts
+  the played part plus the previous track's length, and the result wraps around the whole
+  playlist (no negative progress). Because only the elapsed position changes, the current
+  track, the progress bar and every listener move together, the shuffled order is kept, and
+  skipping also works while paused (the frozen position is moved, so resume continues from
+  there). Sessions with an unknown track duration are not seeked; a stopped speaker has no
+  session at all, so there the buttons just move the selected track instead.
 * Audio decoding runs on a background thread. The first track of a session is decoded
   asynchronously (the voice starts a moment later instead of freezing the game), and the
   next track is pre-decoded while the current one plays, so track changes do not hitch.

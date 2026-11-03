@@ -17,6 +17,8 @@
   "screen.explainstone.button.play": "▶ 播放",
   "screen.explainstone.button.pause": "⏸ 暂停",
   "screen.explainstone.button.stop": "■ 停止",
+  "screen.explainstone.button.previous": "⏮ 上一曲",
+  "screen.explainstone.button.next": "下一曲 ⏭",
   "screen.explainstone.button.redstone": "红石",
   "screen.explainstone.button.mode": "模式",
   "screen.explainstone.button.import": "导入 ogg…",

@@ -118,6 +118,77 @@ public final class SessionTimeline {
         this.paused = false;
         return true;
     }
+
+    // ------------------------------------------------------------ 上一曲 / 下一曲 喵
+
+    /** 整条播放顺序的总时长（tick）；顺序为空或有任何一首时长未知就返回 0 喵 */
+    private long totalTicks() {
+        if (this.order.isEmpty() || this.durations.length != this.order.size()) {
+            return 0L;
+        }
+        long total = 0L;
+        for (int seconds : this.durations) {
+            if (seconds <= 0) {
+                return 0L;   // 时长未知就没法算曲目边界，宁可不切 喵
+            }
+            total += seconds * 20L;
+        }
+        return total;
+    }
+
+    /**
+     * 上一曲 / 下一曲：把整条时间轴往前或往后挪一首歌。
+     *
+     * <p>会话只有「已播放 tick」这一个位置量（客户端按 elapsed % 总时长 定位曲目和偏移），
+     * 所以切歌不需要改播放顺序，只要平移 elapsed：
+     * <ul>
+     *   <li>下一曲 = elapsed + 当前曲还没播的部分（正好落在下一首开头）；</li>
+     *   <li>上一曲 = elapsed − 当前曲已播部分 − 上一首时长（正好落在上一首开头）；</li>
+     *   <li>结果对总时长取模：第一首按「上一曲」绕到最后一首，最后一首按「下一曲」绕回第一首，
+     *       永远不会出现负数（客户端会把负 elapsed 钳成 0）。 喵</li>
+     * </ul>
+     * 暂停中也一样生效：改的是暂停快照，恢复后从新位置继续。
+     *
+     * @param direction 负数 = 上一曲，正数 = 下一曲 喵
+     * @return 是否真的移动了（顺序为空 / 时长未知时不动） 喵
+     */
+    public boolean skipTrack(int direction, long nowGameTime) {
+        long total = this.totalTicks();
+        if (direction == 0 || total <= 0L) {
+            return false;
+        }
+        long elapsed = Math.floorMod(this.elapsedTicks(nowGameTime), total);
+        long acc = 0L;
+        int index = -1;
+        long offset = 0L;
+        for (int i = 0; i < this.durations.length; i++) {
+            long length = this.durations[i] * 20L;
+            if (elapsed < acc + length) {
+                index = i;
+                offset = elapsed - acc;
+                break;
+            }
+            acc += length;
+        }
+        if (index < 0) {
+            return false;
+        }
+        long target;
+        if (direction > 0) {
+            target = elapsed + (this.durations[index] * 20L - offset);
+        } else {
+            int previous = Math.floorMod(index - 1, this.durations.length);
+            target = elapsed - offset - this.durations[previous] * 20L;
+        }
+        target = Math.floorMod(target, total);
+        if (this.paused) {
+            this.pausedElapsed = target;
+        } else {
+            this.startGameTime = nowGameTime - target;
+        }
+        return true;
+    }
+
     /** 曲目列表变化时应用增量 喵 */
     public Result apply(List<Track> newTracks, PlayMode mode, long nowGameTime, Durations durationSource) {
         if (newTracks == null || newTracks.isEmpty()) {

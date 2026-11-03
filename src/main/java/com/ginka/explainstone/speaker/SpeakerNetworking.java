@@ -424,6 +424,12 @@ public final class SpeakerNetworking {
                 be.setSelected(payload.value());
                 setPlaying(level, pos, true);
             }
+            case SpeakerPayloads.ACTION_SKIP -> {
+                // 收信音响的播放内容归发信器管，本机不给切歌 喵
+                if (!be.isReceiveMode()) {
+                    skipTrack(level, pos, be, isTransmitter, payload.value());
+                }
+            }
             case SpeakerPayloads.ACTION_CYCLE_MODE -> be.setMode(be.getMode().next());
             case SpeakerPayloads.ACTION_TOGGLE_REDSTONE -> be.setRespectRedstone(!be.isRespectRedstone());
             case SpeakerPayloads.ACTION_SELECT -> be.setSelected(payload.value());
@@ -439,6 +445,42 @@ public final class SpeakerNetworking {
         } else if (level.getBlockState(pos).getBlock() instanceof com.ginka.explainstone.SpeakerBlock) {
             PlaybackRegistry.ensure(level, pos, be);
         }
+    }
+
+    /**
+     * 上一曲 / 下一曲。
+     *
+     * <p>播放中 / 暂停中：直接平移已有会话的时间轴（{@link SessionTimeline#skipTrack(int, long)}），
+     * 不碰 selected，所以不会重建会话、不会重置进度。
+     * 已经停止（没有会话）：改选中曲目，下次播放就从那一首开始。
+     *
+     * @param direction 负数 = 上一曲，正数 = 下一曲 喵
+     * @return 是否切到了别的曲目 喵
+     */
+    private static boolean skipTrack(ServerLevel level, BlockPos pos, SpeakerBlockEntity be,
+                                     boolean transmitter, int direction) {
+        if (direction == 0) {
+            return false;
+        }
+        if (transmitter) {
+            // 还没登记就先登记：正在广播但会话缺失时，切歌也应该作用在会话上 喵
+            BroadcastRegistry.refresh(level, pos, be);
+            if (BroadcastRegistry.skip(level, pos, direction)) {
+                return true;
+            }
+        } else {
+            PlaybackRegistry.ensure(level, pos, be);
+            if (PlaybackRegistry.skip(level, pos, direction)) {
+                return true;
+            }
+        }
+        // 已停止 / 时长还没校验出来：退回到“换选中曲目”，列表高亮也跟着走 喵
+        int size = be.getTracks().size();
+        if (size <= 0) {
+            return false;
+        }
+        be.setSelected(Math.floorMod(be.getSelected() + (direction > 0 ? 1 : -1), size));
+        return true;
     }
 
     /** 配置为「只有 OP 能广播」时，发信器的界面操作/预检/上传都只允许 OP 使用 喵 */

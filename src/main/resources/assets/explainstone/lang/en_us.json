@@ -17,6 +17,8 @@
   "screen.explainstone.button.play": "▶ Play",
   "screen.explainstone.button.pause": "⏸ Pause",
   "screen.explainstone.button.stop": "■ Stop",
+  "screen.explainstone.button.previous": "⏮ Prev",
+  "screen.explainstone.button.next": "Next ⏭",
   "screen.explainstone.button.redstone": "Redstone",
   "screen.explainstone.button.mode": "Mode",
   "screen.explainstone.button.import": "Import ogg…",

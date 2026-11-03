@@ -75,8 +75,10 @@ public class SpeakerScreen extends Screen {
 
     private Button tabSelf;
     private Button tabReceive;
+    private Button prevButton;
     private Button playButton;
     private Button stopButton;
+    private Button nextButton;
     private Button modeButton;
     private Button redstoneButton;
     private Button playModeButton;
@@ -214,13 +216,23 @@ public class SpeakerScreen extends Screen {
         this.tabSelf.visible = !transmitter;
         this.tabReceive.visible = !transmitter;
 
-        // 播放 / 暂停（同一个按钮切换）+ 停止 喵
+        // 上一曲 / 播放暂停 / 停止 / 下一曲 四等分（切歌只平移时间轴，不重建会话） 喵
+        int quarter = (this.panelW - 12) / 4;
+        this.prevButton = this.addRenderableWidget(Button.builder(
+                        Component.translatable("screen.explainstone.button.previous"),
+                        b -> send(SpeakerPayloads.ACTION_SKIP, -1))
+                .bounds(this.left, this.row1, quarter, BTN_H).build());
         this.playButton = this.addRenderableWidget(Button.builder(Component.translatable("screen.explainstone.button.play"),
                         b -> this.onPlayPauseClicked())
-                .bounds(this.left, this.row1, half, BTN_H).build());
+                .bounds(this.left + quarter + 4, this.row1, quarter, BTN_H).build());
         this.stopButton = this.addRenderableWidget(Button.builder(Component.translatable("screen.explainstone.button.stop"),
                         b -> send(SpeakerPayloads.ACTION_STOP, 0))
-                .bounds(this.left + half + 4, this.row1, half, BTN_H).build());
+                .bounds(this.left + (quarter + 4) * 2, this.row1, quarter, BTN_H).build());
+        this.nextButton = this.addRenderableWidget(Button.builder(
+                        Component.translatable("screen.explainstone.button.next"),
+                        b -> send(SpeakerPayloads.ACTION_SKIP, 1))
+                .bounds(this.left + (quarter + 4) * 3, this.row1,
+                        this.panelW - (quarter + 4) * 3, BTN_H).build());
 
         // 定时（只有发信器用；讲解石/颂美铃用顶部标签页切换自播放/收信，不再需要底部收信开关） 喵
         this.modeButton = transmitter
@@ -441,6 +453,16 @@ public class SpeakerScreen extends Screen {
         }
         if (this.stopButton != null) {
             this.stopButton.visible = !receive;
+        }
+        // 上一曲 / 下一曲：收信模式下播放内容归发信器管，本机不显示；列表为空时置灰 喵
+        boolean hasTracks = be != null && be.getSelected() >= 0;
+        if (this.prevButton != null) {
+            this.prevButton.visible = !receive;
+            this.prevButton.active = hasTracks;
+        }
+        if (this.nextButton != null) {
+            this.nextButton.visible = !receive;
+            this.nextButton.active = hasTracks;
         }
         if (this.importButton != null) {
             this.importButton.visible = !receive;

@@ -44,6 +44,11 @@ public final class SpeakerPayloads {
     public static final int ACTION_PAUSE = 15;
     /** 设置发信器全局音量（value = 0..100，乘到所有收信音响的音量上） 喵 */
     public static final int ACTION_SET_BROADCAST_VOLUME = 16;
+    /**
+     * 上一曲 / 下一曲（value：负数 = 上一曲，正数 = 下一曲）。
+     * 只平移会话时间轴（elapsedTicks），不换选中曲目，所以不会中断/重置进度。 喵
+     */
+    public static final int ACTION_SKIP = 17;
 
     /** 单次传输的分块大小（远小于包上限） 喵 */
     public static final int CHUNK_SIZE = 8000;
