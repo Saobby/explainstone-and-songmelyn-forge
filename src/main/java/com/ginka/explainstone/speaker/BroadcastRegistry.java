@@ -263,6 +263,30 @@ public final class BroadcastRegistry {
         return true;
     }
 
+    /**
+     * 跳到当前曲目的指定进度（发信器界面上点/拖进度条），并立刻重推给收信端。
+     * 只平移时间轴、不动 selected，避免 refresh() 当成换曲重建。 喵
+     *
+     * @param offsetTicks 曲内偏移（tick，0 = 本曲开头） 喵
+     * @return 是否真的移动了（没有广播会话 / 时长未知时 false） 喵
+     */
+    public static boolean seek(ServerLevel level, BlockPos pos, int offsetTicks) {
+        Map<BlockPos, Entry> map = ACTIVE.get(level.dimension());
+        if (map == null) {
+            return false;
+        }
+        Entry entry = map.get(pos);
+        if (entry == null || !entry.timeline.seekInCurrentTrack(offsetTicks, level.getGameTime())) {
+            return false;
+        }
+        entry.revision = ++REVISION;
+        entry.lastSentMs = System.currentTimeMillis();
+        sendEntry(level, pos, entry);
+        LOGGER.info("broadcast session seek pos={} ch={} offsetTicks={} elapsed={} rev={}",
+                pos.toShortString(), entry.channel, offsetTicks, entry.elapsedTicks(level), entry.revision);
+        return true;
+    }
+
     /** 发信器被拆掉/被替换：撤销登记并通知附近玩家停播 喵 */
     public static void forget(ServerLevel level, BlockPos pos) {
         PlaybackPersistence.discard(level.dimension(), pos);

@@ -88,6 +88,14 @@ Port of the Fabric 1.21.1 edition of **Explainstone / Songmelyn / Broadcast Tran
   skipping also works while paused (the frozen position is moved, so resume continues from
   there). Sessions with an unknown track duration are not seeked; a stopped speaker has no
   session at all, so there the buttons just move the selected track instead.
+* **Clicking the progress bar seeks** to that point (press and drag to scrub, the release
+  sends one request). The bar is drawn by the screen itself, so the click handling is
+  manual: while you hold it the bar and the `m:ss / m:ss` text show a local preview, and the
+  real position is only requested on release — one seek means one playlist re-send, which
+  matters for big playlists. Seeking writes the same `elapsedTicks` as skipping, so it works
+  while paused (the frozen position moves) and keeps the shuffled order. Receiving speakers
+  (receive mode) only show the channel's progress and cannot seek it; stopped blocks have no
+  session, hence no progress bar and nothing to seek.
 * Audio decoding runs on a background thread. The first track of a session is decoded
   asynchronously (the voice starts a moment later instead of freezing the game), and the
   next track is pre-decoded while the current one plays, so track changes do not hitch.

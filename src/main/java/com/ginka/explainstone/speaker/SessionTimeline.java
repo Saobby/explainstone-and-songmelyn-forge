@@ -189,6 +189,41 @@ public final class SessionTimeline {
         return true;
     }
 
+    /**
+     * 跳到当前曲目的第 {@code offsetTicks} 个 tick（点进度条 / 拖动进度条）。
+     *
+     * <p>和 {@link #skipTrack} 一样只改「已播放 tick」，不动 selected、不重建会话：
+     * 先按当前时间轴定位出「当前曲目 + 它在时间轴上的起点」，再加上曲内偏移即可。
+     * 暂停中同样有效（改暂停快照，恢复后从这里继续）。 喵
+     *
+     * @param offsetTicks 曲内偏移（tick，0 = 本曲开头）；超出本曲长度会被夹住 喵
+     * @return 是否真的移动了（顺序为空 / 时长未知 / 偏移非法时 false） 喵
+     */
+    public boolean seekInCurrentTrack(int offsetTicks, long nowGameTime) {
+        long total = this.totalTicks();
+        if (total <= 0L || offsetTicks < 0) {
+            return false;
+        }
+        Located current = this.locate(this.elapsedTicks(nowGameTime));
+        if (current == null) {
+            return false;
+        }
+        long base = 0L;
+        for (int i = 0; i < current.index(); i++) {
+            base += this.durations[i] * 20L;
+        }
+        long length = this.durations[current.index()] * 20L;
+        // 点到最右端时留在本曲最后一个 tick，而不是悄悄跳到下一首 喵
+        long offset = Math.min(offsetTicks, Math.max(0L, length - 1L));
+        long target = Math.floorMod(base + offset, total);
+        if (this.paused) {
+            this.pausedElapsed = target;
+        } else {
+            this.startGameTime = nowGameTime - target;
+        }
+        return true;
+    }
+
     /** 曲目列表变化时应用增量 喵 */
     public Result apply(List<Track> newTracks, PlayMode mode, long nowGameTime, Durations durationSource) {
         if (newTracks == null || newTracks.isEmpty()) {

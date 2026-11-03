@@ -49,6 +49,11 @@ public final class SpeakerPayloads {
      * 只平移会话时间轴（elapsedTicks），不换选中曲目，所以不会中断/重置进度。 喵
      */
     public static final int ACTION_SKIP = 17;
+    /**
+     * 跳转到指定进度（value = 当前曲目内的偏移 tick，0 = 本曲开头）。
+     * 同样只平移时间轴，不动选中曲目；点/拖进度条时由客户端发送。 喵
+     */
+    public static final int ACTION_SEEK = 18;
 
     /** 单次传输的分块大小（远小于包上限） 喵 */
     public static final int CHUNK_SIZE = 8000;

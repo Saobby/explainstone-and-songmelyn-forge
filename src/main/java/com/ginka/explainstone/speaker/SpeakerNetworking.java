@@ -430,6 +430,12 @@ public final class SpeakerNetworking {
                     skipTrack(level, pos, be, isTransmitter, payload.value());
                 }
             }
+            case SpeakerPayloads.ACTION_SEEK -> {
+                // 同上：收信音响只看广播，不替发信器跳进度 喵
+                if (!be.isReceiveMode()) {
+                    seekTrack(level, pos, be, isTransmitter, payload.value());
+                }
+            }
             case SpeakerPayloads.ACTION_CYCLE_MODE -> be.setMode(be.getMode().next());
             case SpeakerPayloads.ACTION_TOGGLE_REDSTONE -> be.setRespectRedstone(!be.isRespectRedstone());
             case SpeakerPayloads.ACTION_SELECT -> be.setSelected(payload.value());
@@ -481,6 +487,29 @@ public final class SpeakerNetworking {
         }
         be.setSelected(Math.floorMod(be.getSelected() + (direction > 0 ? 1 : -1), size));
         return true;
+    }
+
+    /**
+     * 跳到当前曲目的指定进度（界面上点 / 拖进度条）。
+     *
+     * <p>和切歌一样只平移已有会话的时间轴，不动 selected；已停止（没有会话）时什么都不做，
+     * 因为停止状态下本来就没有"进度"可言，下次播放仍从选中曲目开始。 喵
+     *
+     * @param offsetTicks 曲内偏移（tick，0 = 本曲开头；服务端会按本曲长度夹住） 喵
+     * @return 是否真的跳了 喵
+     */
+    private static boolean seekTrack(ServerLevel level, BlockPos pos, SpeakerBlockEntity be,
+                                     boolean transmitter, int offsetTicks) {
+        if (offsetTicks < 0) {
+            return false;
+        }
+        if (transmitter) {
+            // 正在广播但会话还没登记时，先登记再跳，否则这次点击会落空 喵
+            BroadcastRegistry.refresh(level, pos, be);
+            return BroadcastRegistry.seek(level, pos, offsetTicks);
+        }
+        PlaybackRegistry.ensure(level, pos, be);
+        return PlaybackRegistry.seek(level, pos, offsetTicks);
     }
 
     /** 配置为「只有 OP 能广播」时，发信器的界面操作/预检/上传都只允许 OP 使用 喵 */

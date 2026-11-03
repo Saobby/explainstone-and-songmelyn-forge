@@ -349,6 +349,29 @@ public final class PlaybackRegistry {
         return true;
     }
 
+    /**
+     * 跳到当前曲目的指定进度（界面上点/拖进度条）。同样只平移时间轴，不碰 selected，
+     * 所以不会重建会话、不会丢播放顺序和随机序。 喵
+     *
+     * @param offsetTicks 曲内偏移（tick，0 = 本曲开头） 喵
+     * @return 是否真的移动了（没有会话 / 时长未知时 false） 喵
+     */
+    public static boolean seek(ServerLevel level, BlockPos pos, int offsetTicks) {
+        Map<BlockPos, Session> map = ACTIVE.get(level.dimension());
+        if (map == null) {
+            return false;
+        }
+        Session session = map.get(pos);
+        if (session == null || !session.timeline.seekInCurrentTrack(offsetTicks, level.getGameTime())) {
+            return false;
+        }
+        session.revision = ++REVISION;
+        sendNearby(level, pos, session);
+        LOGGER.info("playback session seek pos={} offsetTicks={} elapsed={} rev={}", pos.toShortString(),
+                offsetTicks, session.elapsedTicks(level), session.revision);
+        return true;
+    }
+
     /** 每 tick 由方块 ticker 调用：会话缺失就补，列表/模式变了就重开，每 5 秒重推一次 喵 */
     public static void tick(ServerLevel level, BlockPos pos, BlockState state, SpeakerBlockEntity be) {
         ensure(level, pos, be);

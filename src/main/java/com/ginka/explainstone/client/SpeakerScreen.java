@@ -100,6 +100,11 @@ public class SpeakerScreen extends Screen {
     private long pendingRangeAt;
     private int awaitingRangeValue = -1;
     private long awaitingRangeUntil;
+    /** 正在按住进度条：画本地预览位置，松手才发跳转请求（避免拖动时刷屏重推播放列表） 喵 */
+    private boolean seeking;
+    private float seekFraction = -1f;
+    /** 发出跳转请求后的等待截止时间：服务端进度追上或超时前继续画预览位置，别被旧进度拽回去 喵 */
+    private long seekHoldUntil;
 
     public SpeakerScreen(BlockPos pos) {
         super(Component.translatable("screen.explainstone.title.speaker"));
@@ -521,6 +526,58 @@ public class SpeakerScreen extends Screen {
         }
     }
 
+    // ------------------------------------------------------------ 进度条跳转 喵
+
+    /**
+     * 进度条能不能点：发信器（改广播进度）和自播放的音响/颂美铃（改本机会话）可以；
+     * 收信模式只是收听别人的频道，不替发信器指挥。 喵
+     */
+    private boolean progressSeekable() {
+        SpeakerBlockEntity be = this.speaker();
+        return be != null && !be.isReceiveMode();
+    }
+
+    /** 鼠标 x 在进度条上的比例（0..1） 喵 */
+    private float progressFractionAt(double mouseX) {
+        float fraction = (float) ((mouseX - this.left) / this.panelW);
+        return Math.max(0f, Math.min(1f, fraction));
+    }
+
+    /** 鼠标是否在进度条上（进度条本身只有 10px 高，上下各放宽 3px 才好点） 喵 */
+    private boolean isOverProgressBar(double mouseX, double mouseY) {
+        return mouseX >= this.left && mouseX <= this.left + this.panelW
+                && mouseY >= this.progressBarTop - 3 && mouseY <= this.progressBarBottom + 3;
+    }
+
+    /** 进度条对应的进度（自播放看本机会话，发信器/收信看频道广播）；没有会话返回 null 喵 */
+    private float[] currentProgress() {
+        SpeakerBlockEntity be = this.speaker();
+        if (be == null) {
+            return null;
+        }
+        if (this.isTransmitter() || be.isReceiveMode()) {
+            return SpeakerAudio.broadcastProgress(be.getChannel());
+        }
+        return SpeakerAudio.progress(this.pos);
+    }
+
+    /**
+     * 把预览比例换算成「本曲第几 tick」发给服务端（服务端还会按本曲长度再夹一次）。
+     * 每次点击/拖动结束只发一包：服务端会重推整张播放列表，不适合边拖边发。 喵
+     */
+    private void sendSeek() {
+        float[] progress = this.currentProgress();
+        if (progress == null || progress[1] <= 0f) {
+            this.seekFraction = -1f;
+            return;
+        }
+        long durationTicks = Math.round(progress[1] * 20.0);
+        int offsetTicks = (int) Math.max(0L, Math.min(durationTicks,
+                Math.round(Math.max(0f, this.seekFraction) * durationTicks)));
+        send(SpeakerPayloads.ACTION_SEEK, offsetTicks);
+        this.seekHoldUntil = System.currentTimeMillis() + 1500L;
+    }
+
     // ---------------------------------------------------------------- 渲染 喵
     @Override
     public void render(GuiGraphics context, int mouseX, int mouseY, float delta) {
@@ -553,6 +610,27 @@ public class SpeakerScreen extends Screen {
         float[] progress = useBroadcast
                 ? SpeakerAudio.broadcastProgress(be == null ? 0 : be.getChannel())
                 : SpeakerAudio.progress(this.pos);
+        // 进度条：点/拖期间画本地预览位置，别让服务端的旧进度把滑块拽回去 喵
+        boolean previewing = false;
+        float shownFraction = 0f;
+        if (progress != null && progress[1] > 0f) {
+            shownFraction = progress[0] / progress[1];
+            if (this.seekFraction >= 0f) {
+                boolean arrived = Math.abs(shownFraction - this.seekFraction) < 0.02f;
+                if (this.seeking || (!arrived && System.currentTimeMillis() <= this.seekHoldUntil)) {
+                    previewing = true;
+                    shownFraction = this.seekFraction;
+                } else {
+                    this.seekFraction = -1f;   // 服务端追上来了（或等待超时）：回到真实进度 喵
+                }
+            }
+        } else {
+            this.seekFraction = -1f;
+        }
+        shownFraction = Math.max(0f, Math.min(1f, shownFraction));
+        // 发信器 / 自播放音响可以点进度条；收信模式只听广播，不给别人指挥 喵
+        boolean barSeekable = progress != null && this.progressSeekable();
+        boolean barHovered = barSeekable && this.isOverProgressBar(mouseX, mouseY);
         SpeakerUploader.Status upload = SpeakerUploader.status(this.pos);
         // 只有真的需要显示“正在播放/已暂停”或上传状态时才给那一行留位置；
         // 没有进度和上传状态时，列表一直用到播放/停止按钮上方，别让进度条那块区域空着 喵
@@ -618,8 +696,10 @@ public class SpeakerScreen extends Screen {
             }
         }
 
+        // 拖动/点击进度条时右侧时间也跟着预览走，才知道要跳到第几秒 喵
         String time = progress == null ? null
-                : timeOrZero((int) progress[0]) + " / " + timeOrZero((int) progress[1]);
+                : timeOrZero(previewing ? Math.round(shownFraction * progress[1]) : (int) progress[0])
+                        + " / " + timeOrZero((int) progress[1]);
         int timeWidth = time == null ? 0 : this.font.width(time);
         // 上传状态、“正在播放/已暂停”、列表提示共用一行，列表可以向下多排几行 喵
         if (uploadStatus != null) {
@@ -645,9 +725,15 @@ public class SpeakerScreen extends Screen {
                     this.left + this.panelW - 4 - timeWidth, this.nowPlayingY, 0xB0C8FF, true);
             context.fill(this.left, this.progressBarTop, this.left + this.panelW,
                     this.progressBarBottom, 0x60FFFFFF);
-            int filled = Math.round(this.panelW * Math.max(0f, Math.min(1f, progress[0] / progress[1])));
+            int filled = Math.round(this.panelW * shownFraction);
             context.fill(this.left, this.progressBarTop, this.left + filled,
-                    this.progressBarBottom, 0xC06BCB77);
+                    this.progressBarBottom, barHovered ? 0xE07BDC86 : 0xC06BCB77);
+            // 能点的进度条画一个小滑块：鼠标一进来就变白，提示这里可以点/拖 喵
+            if (barSeekable) {
+                int knob = Math.max(this.left, this.left + filled - 1);
+                context.fill(knob, this.progressBarTop - 1, knob + 2, this.progressBarBottom + 1,
+                        barHovered ? 0xFFFFFFFF : 0xE0E8F4FF);
+            }
         }
 
         if (transmitter || receive) {
@@ -698,6 +784,13 @@ public class SpeakerScreen extends Screen {
     public boolean mouseClicked(double mouseX, double mouseY, int button) {
         SpeakerBlockEntity be = this.speaker();
         boolean receive = !this.isTransmitter() && be != null && be.isReceiveMode();
+        // 进度条优先：按下先只记预览位置，松手才发跳转（拖动时不会狂发重推整张列表） 喵
+        if (button == 0 && this.progressSeekable() && this.currentProgress() != null
+                && this.isOverProgressBar(mouseX, mouseY)) {
+            this.seeking = true;
+            this.seekFraction = this.progressFractionAt(mouseX);
+            return true;
+        }
         if (!receive && button == 0 && mouseX >= this.left && mouseX <= this.left + this.panelW
                 && mouseY >= this.listTop - 1 && mouseY < this.listTop + this.listRows * ROW_H) {
             int index = this.scroll + (int) ((mouseY - this.listTop + 1) / ROW_H);
@@ -707,6 +800,31 @@ public class SpeakerScreen extends Screen {
             }
         }
         return super.mouseClicked(mouseX, mouseY, button);
+    }
+
+    @Override
+    public boolean mouseDragged(double mouseX, double mouseY, int button, double dragX, double dragY) {
+        if (this.seeking && button == 0) {
+            // 拖出进度条也继续跟手，松手才真正跳 喵
+            this.seekFraction = this.progressFractionAt(mouseX);
+            return true;
+        }
+        return super.mouseDragged(mouseX, mouseY, button, dragX, dragY);
+    }
+
+    @Override
+    public boolean mouseReleased(double mouseX, double mouseY, int button) {
+        if (this.seeking) {
+            this.seeking = false;
+            if (button == 0) {
+                this.seekFraction = this.progressFractionAt(mouseX);
+                this.sendSeek();
+            } else {
+                this.seekFraction = -1f;
+            }
+            return true;
+        }
+        return super.mouseReleased(mouseX, mouseY, button);
     }
 
     @Override
