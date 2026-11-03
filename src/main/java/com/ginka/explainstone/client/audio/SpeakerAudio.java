@@ -76,41 +76,55 @@ public final class SpeakerAudio {
     private static final Map<BlockPos, Voice> VOICES = new HashMap<>();
     /** 引擎自己的 tick 时钟（20 tick = 1 秒），收到会话后用它推算已经过去的时间 喵 */
     private static long clock;
+    /**
+     * 时间轴的"墙钟"累加值（纳秒）：只在游戏没有暂停时前进。
+     *
+     * <p>客户端时间轴以前用 tick 计数（clock）推进，掉到 20 TPS 以下就比真实时间慢，
+     * 而音频是按真实时间播的；于是服务端每 5 秒重推一次时都会被判成"跳变"，
+     * 然后把整组音响 seek 一下——听感就是"播放速度一快一慢"。改成墙钟后两者同速，不会再互相纠正。 喵
+     */
+    private static long timelineNanos;
+    /** 上一 tick 的纳秒时刻（只用来算墙钟增量） 喵 */
+    private static long lastTickNanos = System.nanoTime();
     /** 服务端下发的讲解石本地播放会话（方块坐标 → 会话） 喵 */
     private static final Map<BlockPos, SyncSession> SESSIONS = new HashMap<>();
     /** 服务端下发的频道广播会话（频道 → 会话） 喵 */
     private static final Map<Integer, BroadcastInfo> BROADCASTS = new HashMap<>();
 
     /**
-     * 服务端会话的客户端副本：记住收到时的已播放 tick，再用本地 tick 时钟往后推。
-     * 这样即使中途离开范围、重进世界，进度也会继续，而不是从 0 开始。 喵
+     * 服务端会话的客户端副本：记住收到时的已播放 tick，之后按**真实时间**往后推。
+     * 这样即使中途离开范围、重进世界，进度也会继续，而不是从 0 开始。
+     * epoch 是"时间轴跳变代数"：seek / 切歌 / 换模式时服务端推来的进度会突然变化，
+     * 客户端一发现就 +1，所有音响一起重新对齐。 喵
      */
     private record SyncSession(List<Track> tracks, int[] durations, PlayMode mode,
-                               long elapsedTicksAtReceive, long receivedClock, long revision,
-                               boolean paused, byte[] available) {
+                               long elapsedTicksAtReceive, long receivedTimelineNanos, long revision,
+                               boolean paused, byte[] available, long epoch) {
         private long elapsedTicks() {
             if (this.paused) {
                 return this.elapsedTicksAtReceive;
             }
-            return this.elapsedTicksAtReceive + Math.max(0L, clock - this.receivedClock);
+            long delta = Math.max(0L, timelineNanos - this.receivedTimelineNanos);
+            return this.elapsedTicksAtReceive + delta / 50_000_000L;   // 20 tick / 秒 喵
         }
     }
 
     private record BroadcastInfo(PlayMode mode, List<Track> tracks, int[] durations,
-                                 long elapsedTicksAtReceive, long receivedClock,
+                                 long elapsedTicksAtReceive, long receivedTimelineNanos,
                                  long revision, long lastSeenClock, boolean paused,
-                                 int volumePercent, byte[] available) {
+                                 int volumePercent, byte[] available, long epoch) {
         private long elapsedTicks() {
             if (this.paused) {
                 return this.elapsedTicksAtReceive;
             }
-            return this.elapsedTicksAtReceive + Math.max(0L, clock - this.receivedClock);
+            long delta = Math.max(0L, timelineNanos - this.receivedTimelineNanos);
+            return this.elapsedTicksAtReceive + delta / 50_000_000L;   // 20 tick / 秒 喵
         }
 
         /** 换音量但不打断时间轴：把当前已播 tick 冻结成新的接收点 喵 */
         private BroadcastInfo withVolume(int volume) {
             return new BroadcastInfo(this.mode, this.tracks, this.durations, this.elapsedTicks(),
-                    clock, this.revision, clock, this.paused, volume, this.available);
+                    timelineNanos, this.revision, clock, this.paused, volume, this.available, this.epoch);
         }
     }
 
@@ -133,6 +147,36 @@ public final class SpeakerAudio {
     private static final int MAX_BROADCASTS = 1024;
     private static final int MAX_PARTIAL_SESSIONS = 256;
     private static final int MAX_PARTIAL_BROADCASTS = 1024;
+    /**
+     * 时间轴跳变阈值（tick）：服务端推来的进度和本地推算差了这么多，就认为不是"正常往前走"，
+     * 而是 seek / 上一曲 / 下一曲 / 换模式。这种跳变必须让**同一组的所有音响一起**重新对齐，
+     * 否则各自按 0.5 秒容差判断，会出现"A 跳了 B 没跳"，两个音响永久差几十~几百毫秒（合唱感）。
+     * 取 0.5 秒是为了和下面的 DRIFT_SECONDS 一致：只在"本来也要纠偏"的幅度上触发，
+     * 不会因为客户端/服务端 tick 速率的正常抖动而每 5 秒重推一次对齐。 喵
+     */
+    private static final long JUMP_TICKS = 20L;
+    /** 播放中允许的进度偏差（秒）：超过才单独 seek，避免不停地打断声音 喵 */
+    private static final double DRIFT_SECONDS = 0.5;
+    /** 同步诊断日志限流：频道 → 上次记录时间（ms） 喵 */
+    private static final Map<Integer, Long> LAST_SYNC_LOG_MS = new HashMap<>();
+    /** 组内相对对齐容差（秒）：同频道音响实测位置差超过它，就把整组拉到同一条线上 喵 */
+    private static final double GROUP_SPREAD_SECONDS = 0.022;
+    /** 组内对齐时偏差小于这个值的音响不用动，避免无意义的 seek 喵 */
+    private static final double GROUP_ALIGN_EPSILON = 0.006;
+    /** 组内相对对齐冷却（tick）：避免测量噪声导致每 tick 都 seek 喵 */
+    private static final long GROUP_ALIGN_COOLDOWN = 4L;
+    /** 上次组内对齐的 tick（频道 → tick） 喵 */
+    private static final Map<Integer, Long> LAST_GROUP_ALIGN = new HashMap<>();
+    /** 上次组内对齐时测到的偏差（频道 → 秒）：下一次用它判断上次拉得有没有效果 喵 */
+    private static final Map<Integer, Double> LAST_GROUP_ALIGN_SPREAD = new HashMap<>();
+    /** 拉了却没效果时的退避（频道 → 需要等待的 tick）：防止在读数不可信时每 4 tick 硬拽一次 喵 */
+    private static final Map<Integer, Long> GROUP_ALIGN_BACKOFF = new HashMap<>();
+    /** 单个音响起播后"自我纠偏"的最小幅度（秒）：起播补偿用挂钟，残差通常只有几毫秒，
+     *  差这么点就别 seek 了——每次 seek 都是可闻的一个小顿挫，几个音响一起跳就是"忽快忽慢"。 喵
+     */
+    private static final double SELF_ALIGN_TOLERANCE = 0.015;
+    /** 整组纠偏时，本来就在位（偏差小于这个值）的音响不用白 seek 一下 喵 */
+    private static final double GROUP_SEEK_EPSILON = 0.12;
 
     /**
      * 一个正在按帧重组的播放列表。
@@ -142,7 +186,8 @@ public final class SpeakerAudio {
         final long revision;
         final int partCount;
         final String[] parts;
-        final long firstPartClock;
+        /** 第 0 帧到达时的墙钟（时间轴锚点） 喵 */
+        final long firstPartNanos;
         int received;
         long totalChars;
         long lastUpdateClock;
@@ -158,7 +203,7 @@ public final class SpeakerAudio {
             this.revision = revision;
             this.partCount = partCount;
             this.parts = new String[partCount];
-            this.firstPartClock = clock;
+            this.firstPartNanos = timelineNanos;
             this.lastUpdateClock = clock;
         }
 
@@ -321,6 +366,7 @@ public final class SpeakerAudio {
         lastWorld = null;
         wasNeedingSync = false;
         audioPaused = false;
+        lastTickNanos = System.nanoTime();
     }
 
     public static void shutdown() {
@@ -350,6 +396,7 @@ public final class SpeakerAudio {
     }
 
     private static void tickSounds(Minecraft client) {
+        long nowNanos = System.nanoTime();
         ClientLevel world = client.level;
         LocalPlayer player = client.player;
         if (world == null || player == null) {
@@ -366,14 +413,19 @@ public final class SpeakerAudio {
         // 否则每 2 秒的 Resync 会把时间轴拉回暂停点，听起来像片段反复 喵
         if (client.isPaused()) {
             pauseVoices();
+            lastTickNanos = nowNanos;   // 暂停期间时间轴不前进 喵
             return;
         }
         if (audioPaused) {
             resumeVoices();
+            lastTickNanos = nowNanos;
         }
         clock++;
+        // 时间轴按真实时间前进：音频就是按真实时间播的，两者同速才不会互相纠正 喵
+        timelineNanos += Math.max(0L, nowNanos - lastTickNanos);
+        lastTickNanos = nowNanos;
         // 本 tick 所有音响共用一个参考时刻：解码耗时会计入偏移补偿，避免起播错开 喵
-        long referenceNanos = System.nanoTime();
+        long referenceNanos = nowNanos;
 
         // 扫描间隔随半径自适应：范围越大扫得越稀，避免大范围时卡顿 喵
         if (tickCounter++ % scanInterval() == 0) {
@@ -414,7 +466,8 @@ public final class SpeakerAudio {
                 int broadcastVolume = info.volumePercent();
                 voice(pos).updateTimeline(info.tracks(), info.durations(), info.mode(), info.elapsedTicks(),
                         world, ear, master, be.getEffectiveAudibleRange(broadcastVolume),
-                        be.getEffectiveVolume(broadcastVolume), facing, referenceNanos);
+                        be.getEffectiveVolume(broadcastVolume), facing, referenceNanos, info.epoch(),
+                        be.getChannel());
                 spawnNotes(world, pos);
             } else {
                 SyncSession session = SESSIONS.get(pos);
@@ -433,7 +486,7 @@ public final class SpeakerAudio {
                     active.add(pos);
                     voice(pos).updateTimeline(session.tracks(), session.durations(), session.mode(),
                             session.elapsedTicks(), world, ear, master, be.getEffectiveAudibleRange(),
-                            be.getVolume(), facing, referenceNanos);
+                            be.getVolume(), facing, referenceNanos, session.epoch(), -1);
                     spawnNotes(world, pos);
                 } else if (be.isPaused()) {
                     // 服务端已经暂停但进度快照还没到（刚进范围/重进存档）：请求 sync 喵
@@ -442,6 +495,12 @@ public final class SpeakerAudio {
             }
         }
 
+        // 诊断：先用本 tick 的实测值（纠偏前）报告同频道音响差多少 喵
+        logSyncSpread();
+        // 需要重新对齐的音响：整组一起跳到同一条时间轴（同一 tick 内完成，才不会一前一后） 喵
+        flushRealigns();
+        // 组内互相比较：谁和同频道其它音响差得明显就拉回参考音响（不依赖时间轴） 喵
+        flushGroupAlignment();
         // 所有本 tick 新加载的音源统一 seek，再批量起播，避免各自解码/起播造成一前一后 喵
         flushPendingStarts();
 
@@ -498,6 +557,226 @@ public final class SpeakerAudio {
     }
 
     /**
+     * 整组统一重新对齐。
+     *
+     * <p>一个频道里只要有一个音响发现要跳（刚起播 / 时间轴跳变 / 漂移超过阈值），
+     * 就把这个频道的**所有**音响一起 seek 到同一条 expected。
+     * 以前是每个音响各自判断、各自 seek：先越阈值的那个跳了、没越的继续播，
+     * 两者瞬间差半个鼓点，而且要等另一个也越阈值才重新合上——听起来就是鼓点一前一后。 喵
+     */
+    /**
+     * 执行本 tick 的重新对齐请求。
+     *
+     * <p>按范围分成两类，这个区分很关键：
+     * <ul>
+     *   <li><b>只有自己</b>（起播残差）：只 seek 当前这个音响。走位时音响会被不断销毁/重建，
+     *       如果每次重建都把整组一起 seek，整首歌就会听起来"忽快忽慢"；</li>
+     *   <li><b>整个频道</b>（时间轴跳变 / 漂移超阈值）：这才是全体事件，所有音响一起跳，
+     *       避免出现"A 跳了 B 没跳"的一前一后。 喵</li>
+     * </ul>
+     */
+    private static void flushRealigns() {
+        List<Voice> requesting = null;
+        for (Voice voice : VOICES.values()) {
+            if (voice.realignScope <= 0) {
+                continue;
+            }
+            if (requesting == null) {
+                requesting = new ArrayList<>(4);
+            }
+            requesting.add(voice);
+        }
+        if (requesting == null) {
+            return;
+        }
+        for (Voice voice : requesting) {
+            if (voice.realignScope <= 0) {
+                continue;   // 已经被同组前面那个音响一起处理过了 喵
+            }
+            int scope = voice.realignScope;
+            voice.realignScope = 0;
+            if (scope == 1 || voice.syncGroup < 0) {
+                // 只修自己：残差小到听不出来就别动，免得每次都来一下小顿挫 喵
+                if (voice.lastMeasuredOffset < 0f) {
+                    continue;
+                }
+                double deviation = Math.abs(voice.lastMeasuredOffset - voice.expectedOffset);
+                if (deviation <= SELF_ALIGN_TOLERANCE) {
+                    continue;
+                }
+                voice.lastMeasuredOffset = -1f;
+                voice.seek(voice.expectedOffset);
+                LOGGER.debug("[sync] pos={} self realign by {} ms", voice.pos.toShortString(),
+                        Math.round(deviation * 1000.0));
+                continue;
+            }
+            int synced = 0;
+            double worst = 0.0;
+            for (Voice peer : VOICES.values()) {
+                if (peer.syncGroup != voice.syncGroup || peer.expectedTick != clock) {
+                    continue;   // 别的组；或本 tick 没算过（刚加载/静音中）→ 它起播后会自己对齐 喵
+                }
+                peer.realignScope = 0;
+                if (peer.lastMeasuredOffset >= 0f) {
+                    double deviation = Math.abs(peer.lastMeasuredOffset - peer.expectedOffset);
+                    worst = Math.max(worst, deviation);
+                    if (deviation < GROUP_SEEK_EPSILON) {
+                        continue;   // 本来就在位，别白 seek 一下 喵
+                    }
+                }
+                peer.lastMeasuredOffset = -1f;   // 本 tick 的测量已作废，别再参与组内相对对齐 喵
+                peer.seek(peer.expectedOffset);
+                synced++;
+            }
+            if (synced > 0) {
+                logRealign(voice.syncGroup, synced, worst, voice.realignReason);
+            }
+        }
+    }
+
+    /**
+     * 诊断：同一个频道里各个音响实测播放位置差多少（每秒最多一条，超过 60ms 才记）。
+     * 如果听得出一前一后、日志里却一直很小，说明不是音频位置错位，
+     * 而更可能是混响/遮挡滤波造成的听感差（可先把 reverbWet 调 0 验证）。 喵
+     */
+    private static void logSyncSpread() {
+        if (clock % 20 != 0) {
+            return;
+        }
+        Map<Integer, double[]> ranges = null;
+        for (Voice voice : VOICES.values()) {
+            if (voice.syncGroup < 0 || voice.lastMeasuredTick != clock || voice.lastMeasuredOffset < 0f) {
+                continue;
+            }
+            if (ranges == null) {
+                ranges = new HashMap<>();
+            }
+            double[] range = ranges.get(voice.syncGroup);
+            if (range == null) {
+                ranges.put(voice.syncGroup,
+                        new double[]{voice.lastMeasuredOffset, voice.lastMeasuredOffset, 1.0});
+            } else {
+                range[0] = Math.min(range[0], voice.lastMeasuredOffset);
+                range[1] = Math.max(range[1], voice.lastMeasuredOffset);
+                range[2] += 1.0;
+            }
+        }
+        if (ranges == null) {
+            return;
+        }
+        for (Map.Entry<Integer, double[]> entry : ranges.entrySet()) {
+            double[] range = entry.getValue();
+            double spread = range[1] - range[0];
+            if (spread > 0.06) {
+                LOGGER.info("[sync] channel {}: {} speakers, measured spread {} ms (min={}s max={}s)",
+                        entry.getKey(), (int) range[2], Math.round(spread * 1000.0),
+                        String.format("%.3f", range[0]), String.format("%.3f", range[1]));
+            }
+        }
+    }
+
+    /** 整组对齐日志：每秒最多一条，避免每 tick 刷屏 喵 */
+    private static void logRealign(int channel, int speakers, double worstSeconds, int reason) {
+        long nowMs = System.currentTimeMillis();
+        Long last = LAST_SYNC_LOG_MS.get(channel);
+        if (last != null && nowMs - last < 1000L) {
+            return;
+        }
+        LAST_SYNC_LOG_MS.put(channel, nowMs);
+        LOGGER.info("[sync] channel {} realigned {} speakers ({}), worst offset {} ms", channel, speakers,
+                reason == 1 ? "timeline jump" : "drift", Math.round(worstSeconds * 1000.0));
+    }
+
+    /**
+     * 组内相对对齐：同一个频道里各音响的实测位置互相比一比，谁和大多数不一致就拉回来。
+     *
+     * <p>这是时间轴纠偏的补充——时间轴纠偏保证"跟得上服务端"，这一步保证"彼此不前后"。
+     * 两次测量用的是同一把尺子（同一个驱动 / 同一次混音周期），报告滞后这类偏差会相互抵消，
+     * 所以整组拉回中位数就能把 flam（鼓点一前一后）压到 20ms 以内。
+     *
+     * <p>如果拉了一次偏差没变小，说明这个驱动的读数本身不可信（这时候硬拉只会把音频拽跑），
+     * 于是按频道退避，不再反复 seek——否则就成了"忽快忽慢"。 喵
+     */
+    private static void flushGroupAlignment() {
+        Map<Integer, List<Voice>> groups = null;
+        for (Voice voice : VOICES.values()) {
+            if (voice.syncGroup < 0 || voice.expectedTick != clock || voice.lastMeasuredOffset < 0f) {
+                continue;
+            }
+            if (groups == null) {
+                groups = new HashMap<>();
+            }
+            groups.computeIfAbsent(voice.syncGroup, key -> new ArrayList<>(4)).add(voice);
+        }
+        if (groups == null) {
+            return;
+        }
+        long now = System.nanoTime();
+        for (Map.Entry<Integer, List<Voice>> entry : groups.entrySet()) {
+            int channel = entry.getKey();
+            List<Voice> group = entry.getValue();
+            if (group.size() < 2) {
+                continue;
+            }
+            long cooldown = GROUP_ALIGN_BACKOFF.getOrDefault(channel, GROUP_ALIGN_COOLDOWN);
+            Long lastTick = LAST_GROUP_ALIGN.get(channel);
+            if (lastTick != null && clock - lastTick < cooldown) {
+                continue;
+            }
+            double[] positions = new double[group.size()];
+            double min = Double.MAX_VALUE;
+            double max = -Double.MAX_VALUE;
+            for (int i = 0; i < group.size(); i++) {
+                Voice voice = group.get(i);
+                // 统一换算到"现在"：本 tick 里逐个音响的处理时间差也要算进去 喵
+                positions[i] = voice.lastMeasuredOffset
+                        + (now - voice.lastMeasuredNanos) / 1_000_000_000.0;
+                min = Math.min(min, positions[i]);
+                max = Math.max(max, positions[i]);
+            }
+            double spread = max - min;
+            if (spread <= GROUP_SPREAD_SECONDS) {
+                // 已经对齐了：清掉退避记录，下次有问题还能立刻拉 喵
+                GROUP_ALIGN_BACKOFF.remove(channel);
+                LAST_GROUP_ALIGN_SPREAD.remove(channel);
+                continue;
+            }
+            Double previousSpread = LAST_GROUP_ALIGN_SPREAD.get(channel);
+            if (previousSpread != null && spread >= previousSpread * 0.8) {
+                // 上次拉完偏差没变小：这个环境下位置读数可能不可信，别再硬拽 喵
+                long backoff = Math.min(cooldown * 5L, 600L);
+                GROUP_ALIGN_BACKOFF.put(channel, backoff);
+                LAST_GROUP_ALIGN_SPREAD.put(channel, spread);
+                LAST_GROUP_ALIGN.put(channel, clock);
+                LOGGER.warn("[sync] channel {}: pull had no effect ({} ms -> {} ms), backing off {} ticks",
+                        channel, Math.round(previousSpread * 1000.0), Math.round(spread * 1000.0), backoff);
+                continue;
+            }
+            double[] sorted = positions.clone();
+            Arrays.sort(sorted);
+            double target = sorted[sorted.length / 2];
+            int moved = 0;
+            double worst = 0.0;
+            for (int i = 0; i < group.size(); i++) {
+                double deviation = positions[i] - target;
+                if (Math.abs(deviation) <= GROUP_ALIGN_EPSILON) {
+                    continue;
+                }
+                group.get(i).seek(target);
+                moved++;
+                worst = Math.max(worst, Math.abs(deviation));
+            }
+            LAST_GROUP_ALIGN.put(channel, clock);
+            LAST_GROUP_ALIGN_SPREAD.put(channel, spread);
+            if (moved > 0) {
+                LOGGER.info("[sync] channel {}: aligned {} of {} speakers (spread {} ms, worst {} ms)",
+                        channel, moved, group.size(), Math.round(spread * 1000.0),
+                        Math.round(worst * 1000.0));
+            }
+        }
+    }
+
+    /**
      * 同一 tick 内新加载的所有音响：用同一个现在时刻计算目标偏移，
      * 先全部 seek，再用一次 alSourcePlayv 批量起播，尽量让它们在同一混音周期开始。 喵
      */
@@ -515,6 +794,9 @@ public final class SpeakerAudio {
             double target = voice.pendingOffset
                     + (now - voice.pendingReferenceNanos) / 1_000_000_000.0;
             voice.seek(target);
+            // 起播补偿用的是挂钟，解码耗时不同的音响会留下几十毫秒残差；下一 tick 统一按
+            // 同一条时间轴再对齐一次，保证同一组音响的起播位置完全一致（不会一前一后） 喵
+            voice.alignNextTick = true;
             sources[count++] = voice.source;
         }
         if (count > 0) {
@@ -573,9 +855,14 @@ public final class SpeakerAudio {
         transmitters = List.of();
         SESSIONS.clear();
         BROADCASTS.clear();
+        LAST_SYNC_LOG_MS.clear();
+        LAST_GROUP_ALIGN.clear();
+        LAST_GROUP_ALIGN_SPREAD.clear();
+        GROUP_ALIGN_BACKOFF.clear();
         lastWorld = null;
         wasNeedingSync = false;
         audioPaused = false;
+        lastTickNanos = System.nanoTime();
     }
 
     // ------------------------------------------------------------------ 扫描 喵
@@ -976,6 +1263,22 @@ public final class SpeakerAudio {
         /** 新曲加载后的统一 seek / 起播参数 喵 */
         private double pendingOffset;
         private long pendingReferenceNanos;
+        /** 时间轴跳变代数：变了就说明服务端 seek/切歌过，本音响必须无条件重新对齐 喵 */
+        private long seenEpoch = Long.MIN_VALUE;
+        /** 刚起播：下一 tick 无条件按共享时间轴再对齐一次（抹掉挂钟补偿留下的残差） 喵 */
+        private boolean alignNextTick;
+        /** 本 tick 算出的时间轴目标（秒）与所属同步组；真正 seek 留到 tick 末整组一起做 喵 */
+        private double expectedOffset;
+        private int syncGroup = -1;
+        private long expectedTick = Long.MIN_VALUE;
+        /** 本 tick 需要重新对齐的范围：0 = 不需要，1 = 只有自己（起播），2 = 整个频道（跳变/漂移） 喵 */
+        private int realignScope;
+        /** 重新对齐的原因：0 = 起播残差，1 = 时间轴跳变，2 = 漂移超阈值（只用于日志） 喵 */
+        private int realignReason;
+        /** 诊断用：本 tick 实测的播放位置（秒）与 tick，用来报告同组音响到底差多少 喵 */
+        private float lastMeasuredOffset = -1f;
+        private long lastMeasuredTick = Long.MIN_VALUE;
+        private long lastMeasuredNanos = Long.MIN_VALUE;
 
         private Voice(BlockPos pos) {
             this.pos = pos;
@@ -1011,7 +1314,10 @@ public final class SpeakerAudio {
          */
         private void updateTimeline(List<Track> tracks, int[] durations, PlayMode mode, long elapsedTicks,
                                     ClientLevel world, Vec3 ear, float categoryGain, double audibleRange,
-                                    int volumePercent, Direction facing, long referenceNanos) {
+                                    int volumePercent, Direction facing, long referenceNanos, long epoch,
+                                    int syncGroup) {
+            this.realignScope = 0;
+            this.lastMeasuredOffset = -1f;
             this.volumePercent = Math.max(0, Math.min(100, volumePercent));
             double dx = ear.x - (this.pos.getX() + 0.5);
             double dy = ear.y - (this.pos.getY() + 0.5);
@@ -1090,9 +1396,35 @@ public final class SpeakerAudio {
                 }
             } else {
                 float current = AL10.alGetSourcef(this.source, AL11.AL_SEC_OFFSET);
+                this.lastMeasuredOffset = current;
+                this.lastMeasuredTick = clock;
+                this.lastMeasuredNanos = System.nanoTime();
+                // 时间轴跳变（seek / 上一曲 / 下一曲 / 换模式）或刚起播：不做各自为政的容差判断，
+                // 标记为“本 tick 要重新对齐”，tick 末同一组的所有音响一起跳到同一条 expected 喵
+                this.expectedOffset = expected;
+                this.syncGroup = syncGroup;
+                this.expectedTick = clock;
+                boolean startAlign = this.alignNextTick;
+                boolean timelineJump = epoch != this.seenEpoch;
+                this.alignNextTick = false;
+                this.seenEpoch = epoch;
+                if (timelineJump) {
+                    // 时间轴跳变（seek / 上一曲 / 下一曲 / 换模式）：整组都要跟着跳 喵
+                    this.realignScope = 2;
+                    this.realignReason = 1;
+                    return;
+                }
+                if (startAlign) {
+                    // 刚起播：只修自己的起播残差，绝不动同频道其它音响——
+                    // 走位时音响会不断重建，每次把整组都 seek 一下就会听起来"忽快忽慢" 喵
+                    this.realignScope = 1;
+                    this.realignReason = 0;
+                    return;
+                }
                 // OpenAL 的播放位置按混音周期刷新，通常有 ~0.1 秒滞后；阈值留足余量 喵
-                if (Math.abs(current - expected) > 0.5f) {
-                    this.seek(expected);
+                if (Math.abs(current - expected) > DRIFT_SECONDS) {
+                    this.realignScope = 2;
+                    this.realignReason = 2;
                 }
             }
         }
@@ -1561,6 +1893,41 @@ public final class SpeakerAudio {
         return located == null ? null : located.track().label();
     }
 
+    /**
+     * 服务端推来的进度和本地推算差得太多（或者暂停状态翻转），说明这不是"正常往前走"，
+     * 而是 seek / 上一曲 / 下一曲 / 换模式：整组音响必须一起重新对齐。 喵
+     */
+    private static boolean timelineJumped(long localElapsedTicks, long incomingElapsedTicks,
+                                          boolean localPaused, boolean incomingPaused) {
+        return localPaused != incomingPaused
+                || Math.abs(incomingElapsedTicks - localElapsedTicks) > JUMP_TICKS;
+    }
+
+    /** 讲解石本地会话的新跳变代数：跳变就 +1，所有音响一起重新对齐 喵 */
+    private static long nextEpoch(SyncSession current, PartialPlaylist partial) {
+        if (current == null) {
+            return 0L;
+        }
+        return timelineJumped(current.elapsedTicks(), partial.elapsedTicks,
+                current.paused(), partial.paused) ? current.epoch() + 1L : current.epoch();
+    }
+
+    /** 频道广播的新跳变代数：跳变就 +1，频道里所有收信音响一起重新对齐 喵 */
+    private static long nextEpoch(BroadcastInfo current, PartialPlaylist partial) {
+        if (current == null) {
+            return 0L;
+        }
+        long local = current.elapsedTicks();
+        long diff = partial.elapsedTicks - local;
+        boolean jumped = timelineJumped(local, partial.elapsedTicks, current.paused(), partial.paused);
+        if (jumped) {
+            // 诊断：跳变代数为啥涨了——服务端进度 / 本地推算 / 差值 / 暂停标志 喵
+            LOGGER.info("[sync] ch epoch +1: server={} local={} diff={} ticks, paused {}->{}",
+                    partial.elapsedTicks, local, diff, current.paused(), partial.paused);
+        }
+        return jumped ? current.epoch() + 1L : current.epoch();
+    }
+
     /** 服务端推送：某频道开始/停止广播（可能分多帧；带播放顺序 + 已播放 tick） 喵 */
     public static void onBroadcast(SpeakerPayloads.Broadcast payload) {
         int channel = payload.channel();
@@ -1616,8 +1983,8 @@ public final class SpeakerAudio {
         AudioSources.applyAvailabilitySnapshot(tracks, partial.available);
         BROADCASTS.put(channel, new BroadcastInfo(PlayMode.byOrdinal(partial.mode),
                 tracks, partial.durations, partial.elapsedTicks,
-                partial.firstPartClock, partial.revision, clock, partial.paused, partial.volume,
-                partial.available));
+                partial.firstPartNanos, partial.revision, clock, partial.paused, partial.volume,
+                partial.available, nextEpoch(current, partial)));
     }
 
     /**
@@ -1690,7 +2057,8 @@ public final class SpeakerAudio {
         AudioSources.applyAvailabilitySnapshot(tracks, partial.available);
         SESSIONS.put(key, new SyncSession(tracks, partial.durations,
                 PlayMode.byOrdinal(partial.mode), partial.elapsedTicks,
-                partial.firstPartClock, partial.revision, partial.paused, partial.available));
+                partial.firstPartNanos, partial.revision, partial.paused, partial.available,
+                nextEpoch(current, partial)));
         LOGGER.info("session pos={} rev={} tracks={} durations={} availableBytes={} elapsed={} paused={}",
                 key.toShortString(), partial.revision, tracks.size(), partial.durations.length,
                 partial.available.length, partial.elapsedTicks, partial.paused);

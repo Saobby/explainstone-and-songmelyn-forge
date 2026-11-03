@@ -99,6 +99,14 @@ Port of the Fabric 1.21.1 edition of **Explainstone / Songmelyn / Broadcast Tran
 * Audio decoding runs on a background thread. The first track of a session is decoded
   asynchronously (the voice starts a moment later instead of freezing the game), and the
   next track is pre-decoded while the current one plays, so track changes do not hitch.
+* Speakers on the same channel stay sample-aligned. A timeline jump (skip, progress-bar seek,
+  mode change) or a drift over 0.5 s re-aligns *every* voice of that group to the same computed
+  position, and the voices are additionally compared against each other every tick (a speaker
+  more than 80 ms away from the best-tracking one is pulled back). A voice that merely
+  (re)started — speakers are destroyed/recreated as chunks load in and out while you move — is
+  only corrected on its own, and only if it is more than 40 ms off: seeking the whole group on
+  every restart made the music sound like it was speeding up and slowing down.
+  `[sync] ...` lines in `logs/latest.log` report group realigns and any remaining measured spread.
 * One volume slider controls both loudness and audible range:
   `effective range = audibleRangeAtFullVolume × volume / 100`. Setting it to 0 mutes the
   speaker, so there is no separate sound on/off toggle. Local playback vs. receive mode is
