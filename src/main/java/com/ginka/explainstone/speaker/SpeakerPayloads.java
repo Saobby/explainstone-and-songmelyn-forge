@@ -387,6 +387,21 @@ public final class SpeakerPayloads {
     }
 
     /**
+     * 服务端 → 客户端：**界面操作**因为频道音响已满被拒绝（放置方块那条路径走聊天栏，不走这里）。
+     * 客户端把它显示在音响界面里，而不是聊天栏。 喵
+     */
+    public record ChannelFull(BlockPos pos, int limit) {
+        public void encode(FriendlyByteBuf buf) {
+            buf.writeBlockPos(this.pos);
+            buf.writeVarInt(this.limit);
+        }
+
+        public static ChannelFull decode(FriendlyByteBuf buf) {
+            return new ChannelFull(buf.readBlockPos(), buf.readVarInt());
+        }
+    }
+
+    /**
      * 服务端 → 客户端：某个频道所有**收信音响**的位置 / 音量 / 朝向。
      *
      * <p>客户端拿到它之后，就能在同一个 tick 里为整条频道创建并起播全部 source

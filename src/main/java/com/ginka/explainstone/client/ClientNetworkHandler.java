@@ -54,4 +54,8 @@ public final class ClientNetworkHandler {
     public static void handleChannelSpeakers(SpeakerPayloads.ChannelSpeakers payload) {
         SpeakerAudio.onChannelSpeakers(payload);
     }
+
+    public static void handleChannelFull(SpeakerPayloads.ChannelFull payload) {
+        SpeakerAudio.onChannelFull(payload);
+    }
 }

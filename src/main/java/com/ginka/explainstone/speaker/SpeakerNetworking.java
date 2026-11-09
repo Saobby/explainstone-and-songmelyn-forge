@@ -55,8 +55,8 @@ import java.util.function.Supplier;
  * 音频库位置：&lt;存档&gt;/explainstone/audio/&lt;sha1&gt;.ogg 喵
  */
 public final class SpeakerNetworking {
-    /** 网络协议版本（11：时间轴墙钟毫秒 + 频道收信音响列表；旧客户端会被安全拒绝） 喵 */
-    private static final String PROTOCOL_VERSION = "11";
+    /** 网络协议版本（12：时间轴墙钟毫秒 + 频道收信音响列表 + 界面拒绝提示；旧客户端会被安全拒绝） 喵 */
+    private static final String PROTOCOL_VERSION = "12";
     /** 界面操作的最大有效距离（格） 喵 */
     private static final double MAX_INTERACT_DISTANCE_SQ = 64 * 64;
 
@@ -204,6 +204,11 @@ public final class SpeakerNetworking {
         CHANNEL.registerMessage(11, SpeakerPayloads.ChannelSpeakers.class,
                 SpeakerPayloads.ChannelSpeakers::encode, SpeakerPayloads.ChannelSpeakers::decode,
                 SpeakerNetworking::handleChannelSpeakers, Optional.of(NetworkDirection.PLAY_TO_CLIENT));
+
+        // 服务端 → 客户端：界面操作被拒绝（频道音响已满）→ 显示在音响界面里 喵
+        CHANNEL.registerMessage(12, SpeakerPayloads.ChannelFull.class,
+                SpeakerPayloads.ChannelFull::encode, SpeakerPayloads.ChannelFull::decode,
+                SpeakerNetworking::handleChannelFull, Optional.of(NetworkDirection.PLAY_TO_CLIENT));
     }
 
     public static void sendToPlayer(ServerPlayer player, Object message) {
@@ -364,6 +369,14 @@ public final class SpeakerNetworking {
         context.setPacketHandled(true);
     }
 
+    private static void handleChannelFull(SpeakerPayloads.ChannelFull payload,
+                                          Supplier<NetworkEvent.Context> ctx) {
+        NetworkEvent.Context context = ctx.get();
+        context.enqueueWork(() -> DistExecutor.unsafeRunWhenOn(Dist.CLIENT,
+                () -> () -> com.ginka.explainstone.client.ClientNetworkHandler.handleChannelFull(payload)));
+        context.setPacketHandled(true);
+    }
+
     private static void handleBroadcastVolume(SpeakerPayloads.BroadcastVolume payload,
                                               Supplier<NetworkEvent.Context> ctx) {
         NetworkEvent.Context context = ctx.get();
@@ -419,8 +432,7 @@ public final class SpeakerNetworking {
             case SpeakerPayloads.ACTION_SET_CHANNEL -> {
                 int channel = Math.floorMod(payload.value(), 1000);
                 if (be.isReceiveMode() && channel != be.getChannel() && !hasChannelRoom(level, channel, be)) {
-                    player.displayClientMessage(Component.translatable("message.explainstone.channel.full",
-                            ExplainstoneServerConfig.maxSpeakersPerChannel()), false);
+                    notifyChannelFull(player, pos);
                 } else {
                     be.setChannel(channel);
                 }
@@ -428,9 +440,8 @@ public final class SpeakerNetworking {
             case SpeakerPayloads.ACTION_TOGGLE_RECEIVE -> {
                 boolean wantReceive = !be.isReceiveMode();
                 if (wantReceive && !hasChannelRoom(level, be.getChannel(), be)) {
-                    // 频道的收信音响已经到上限：不切模式，直接告诉玩家 喵
-                    player.displayClientMessage(Component.translatable("message.explainstone.channel.full",
-                            ExplainstoneServerConfig.maxSpeakersPerChannel()), false);
+                    // 频道的收信音响已经到上限：不切模式，把提示塞进音响界面里（不是聊天栏） 喵
+                    notifyChannelFull(player, pos);
                 } else {
                     be.setReceiveMode(wantReceive);
                     // 收发模式切换时暂停状态作废：收信模式没有“暂停”，切回自播放也从停止态开始 喵
@@ -544,6 +555,12 @@ public final class SpeakerNetworking {
      * 这个音响还能不能加入某个频道：频道里的收信音响数量是否还没到上限。
      * 已经在这个频道里登记过的音响永远算"有位置"（不算新增）。 喵
      */
+    /** 界面操作被拒绝：只发给本人，客户端把它显示在音响界面里 喵 */
+    private static void notifyChannelFull(ServerPlayer player, BlockPos pos) {
+        sendToPlayer(player, new SpeakerPayloads.ChannelFull(pos,
+                ExplainstoneServerConfig.maxSpeakersPerChannel()));
+    }
+
     private static boolean hasChannelRoom(ServerLevel level, int channel, SpeakerBlockEntity be) {
         if (be.isSpeakerRegistered() && be.getChannel() == channel) {
             return true;

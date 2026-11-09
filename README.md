@@ -113,7 +113,14 @@ Port of the Fabric 1.21.1 edition of **Explainstone / Songmelyn / Broadcast Tran
   all start in the same mixer cycle again); volume or facing changes never rebuild anything.
   Corrections are no longer driven by reading `AL_SEC_OFFSET` back: that
   readout is only accurate to a few dozen milliseconds, and chasing it made things worse.
-  The number of speakers per channel is capped by `maxSpeakersPerChannel` (server config).
+  The number of speakers per channel is capped by `maxSpeakersPerChannel` (server config):
+  refusing the change in the speaker screen shows the hint *inside* the screen, while placing
+  a copy of a receiving speaker (creative pick-block) into a full channel tells you in chat
+  and forces that block back to self-playback.
+* Note particles float above a speaker while **it** is emitting sound (its own volume > 0),
+  not while *you* can hear it: the transmitter's global volume and distance attenuation change
+  how loud it reaches you, but not whether it is playing. Only speakers within 48 blocks spawn
+  particles, purely to avoid wasting render work on far-away ones.
 * One volume slider controls both loudness and audible range:
   `effective range = audibleRangeAtFullVolume × volume / 100`. Setting it to 0 mutes the
   speaker, so there is no separate sound on/off toggle. Local playback vs. receive mode is

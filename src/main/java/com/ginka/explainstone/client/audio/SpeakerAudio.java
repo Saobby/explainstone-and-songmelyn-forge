@@ -149,6 +149,19 @@ public final class SpeakerAudio {
     private static final Set<Integer> REBUILD_CHANNELS = new HashSet<>();
 
     /**
+     * 音符粒子的距离上限（格）。
+     *
+     * <p>粒子是"这座音响在放音"的视觉提示，判据只看它自己的音量，与玩家听到的声音大小无关
+     * （玩家听到的还要乘距离衰减和全局音量）；这个距离只是为了避免给几百格外的音响也生成粒子。 喵
+     */
+    private static final double NOTE_PARTICLE_DISTANCE = 48.0;
+
+    /** 界面操作被拒绝时的提示：坐标 → {截止时间, 上限}；音响界面读取后自己显示，不进聊天栏 喵 */
+    private static final Map<BlockPos, long[]> CHANNEL_FULL_NOTICES = new HashMap<>();
+    /** 提示显示时长（毫秒） 喵 */
+    private static final long NOTICE_MILLIS = 5_000L;
+
+    /**
      * 一个频道的收信音响列表（位置 / 音量 / 朝向）。
      *
      * <p>有了它，客户端不再依赖"扫描自己已加载的区块"，可以把整条频道的 source
@@ -158,6 +171,28 @@ public final class SpeakerAudio {
         private int size() {
             return this.positions == null ? 0 : this.positions.length;
         }
+    }
+
+    /** 服务端推送：界面操作被拒绝（频道收信音响已满）→ 存起来给音响界面显示 喵 */
+    public static void onChannelFull(SpeakerPayloads.ChannelFull payload) {
+        if (payload == null) {
+            return;
+        }
+        CHANNEL_FULL_NOTICES.put(payload.pos(),
+                new long[]{System.currentTimeMillis() + NOTICE_MILLIS, payload.limit()});
+    }
+
+    /** 音响界面读这条提示：没提示或过期返回 0，否则返回上限数字 喵 */
+    public static int channelFullNotice(BlockPos pos) {
+        long[] notice = CHANNEL_FULL_NOTICES.get(pos);
+        if (notice == null) {
+            return 0;
+        }
+        if (notice[0] < System.currentTimeMillis()) {
+            CHANNEL_FULL_NOTICES.remove(pos);
+            return 0;
+        }
+        return (int) notice[1];
     }
 
     /** 服务端推送：某频道的收信音响列表（位置/音量/朝向） 喵 */
@@ -275,15 +310,10 @@ public final class SpeakerAudio {
                 voice(pos).updateTimeline(info.tracks(), info.durations(), info.mode(), info.elapsedMillis(),
                         world, ear, master, range, effectiveVolume, SpeakerRegistry.facingOf(facingOrdinal),
                         referenceNanos, info.epoch(), channel);
-                // 只有真的在可闻范围内的音响才冒音符（远端的几十个不冒，省渲染） 喵
-                if (range > 0.0) {
-                    double dx = ear.x - (pos.getX() + 0.5);
-                    double dy = ear.y - (pos.getY() + 0.5);
-                    double dz = ear.z - (pos.getZ() + 0.5);
-                    if (dx * dx + dy * dy + dz * dz <= range * range) {
-                        spawnNotes(world, pos);
-                    }
-                }
+                // 粒子只看"这座音响是不是在放音"（音量 > 0），**不**看玩家能听多远：
+                // 全局音量调低时音响照样在放，音符也应该照常冒；距离只用来避免给很远、
+                // 根本看不见的音响生成粒子 喵
+                spawnNotesIfNear(world, pos, ear, effectiveVolume);
             }
         }
     }
@@ -293,6 +323,7 @@ public final class SpeakerAudio {
         SPEAKER_LISTS.clear();
         CHANNEL_VOICES.clear();
         REBUILD_CHANNELS.clear();
+        CHANNEL_FULL_NOTICES.clear();
     }
 
     private static final Map<BlockPos, PartialPlaylist> PARTIAL_SESSIONS = new HashMap<>();
@@ -624,7 +655,7 @@ public final class SpeakerAudio {
                     voice(pos).updateTimeline(session.tracks(), session.durations(), session.mode(),
                             session.elapsedMillis(), world, ear, master, be.getEffectiveAudibleRange(),
                             be.getVolume(), facing, referenceNanos, session.epoch(), -1);
-                    spawnNotes(world, pos);
+                    spawnNotesIfNear(world, pos, ear, be.getVolume());
                 } else if (be.isPaused()) {
                     // 服务端已经暂停但进度快照还没到（刚进范围/重进存档）：请求 sync 喵
                     needSync = true;
@@ -673,6 +704,25 @@ public final class SpeakerAudio {
             }
         }
 
+    }
+
+    /**
+     * 音响在放音（音量 > 0）且离玩家不太远 → 冒音符。
+     *
+     * <p>判据是"这座音响实际在放的音量"，**不是**玩家听到的音量：玩家听到的音量还要乘距离衰减
+     * 和全局音量，用它当判据会导致全局音量调低后只有贴脸才有粒子。 喵
+     */
+    private static void spawnNotesIfNear(ClientLevel world, BlockPos pos, Vec3 ear, int volumePercent) {
+        if (volumePercent <= 0) {
+            return;
+        }
+        double dx = ear.x - (pos.getX() + 0.5);
+        double dy = ear.y - (pos.getY() + 0.5);
+        double dz = ear.z - (pos.getZ() + 0.5);
+        if (dx * dx + dy * dy + dz * dz > NOTE_PARTICLE_DISTANCE * NOTE_PARTICLE_DISTANCE) {
+            return;   // 太远、根本看不见，冒了也是白渲染 喵
+        }
+        spawnNotes(world, pos);
     }
 
     /** 正在出声的讲解石头顶冒音符（本地播放和收信模式都有） 喵 */

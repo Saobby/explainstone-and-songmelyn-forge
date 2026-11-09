@@ -71,6 +71,7 @@
   "message.explainstone.import.too_long": "Audio too long (max %s seconds).",
   "message.explainstone.import.playlist_full": "Playlist is full (max %s tracks).",
   "message.explainstone.channel.full": "This channel already has the maximum number of receiving speakers (%s)",
+  "message.explainstone.channel.full.reset": "This channel already has the maximum number of receiving speakers (%s); this speaker was reset to self-playback",
   "message.explainstone.import.sha_mismatch": "Upload rejected: SHA-1 checksum mismatch.",
   "message.explainstone.import.failed": "Failed to store audio.",
   "message.explainstone.import.busy": "Too many uploads are in progress; try again in a moment.",

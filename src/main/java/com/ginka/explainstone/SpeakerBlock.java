@@ -19,9 +19,12 @@ import com.ginka.explainstone.speaker.SpeakerRegistry;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.server.level.ServerLevel;
+import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.InteractionResult;
+import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.player.Player;
+import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.context.BlockPlaceContext;
 import net.minecraft.world.level.BlockGetter;
 import net.minecraft.world.level.Level;
@@ -70,6 +73,22 @@ public class SpeakerBlock extends Block implements EntityBlock {
     public BlockState getStateForPlacement(BlockPlaceContext context) {
         // 网罩面朝玩家 喵
         return this.defaultBlockState().setValue(FACING, context.getHorizontalDirection().getOpposite());
+    }
+
+    /**
+     * 放置时记下"谁放的"。
+     *
+     * <p>用创造模式中键取方块再放下来，物品里会带方块实体 NBT（可能已经是收信模式 + 某个频道），
+     * 而那份 NBT 要等 {@code BlockItem#updateCustomBlockEntityTag} 才写进方块实体——比这里晚。
+     * 所以这里先记住放置者，等第一个 tick 登记失败（频道已满）时再回头提示他并把音响重置为自播放 喵
+     */
+    @Override
+    public void setPlacedBy(Level level, BlockPos pos, BlockState state, @Nullable LivingEntity placer,
+                            ItemStack stack) {
+        super.setPlacedBy(level, pos, state, placer, stack);
+        if (level instanceof ServerLevel serverLevel && placer instanceof ServerPlayer player) {
+            SpeakerRegistry.rememberPlacer(serverLevel, pos, player.getUUID());
+        }
     }
 
     private static VoxelShape shapeOf(Direction facing) {

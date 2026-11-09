@@ -702,7 +702,15 @@ public class SpeakerScreen extends Screen {
                         + " / " + timeOrZero((int) progress[1]);
         int timeWidth = time == null ? 0 : this.font.width(time);
         // 上传状态、“正在播放/已暂停”、列表提示共用一行，列表可以向下多排几行 喵
-        if (uploadStatus != null) {
+        // 界面操作被拒绝（频道音响已满）：临时占用这一行，红字提示，不进聊天栏 喵
+        int channelFullLimit = SpeakerAudio.channelFullNotice(this.pos);
+        if (channelFullLimit > 0) {
+            String warn = Component.translatable("message.explainstone.channel.full", channelFullLimit)
+                    .getString();
+            int available = this.panelW - 8 - (time == null ? 0 : timeWidth + 6);
+            context.drawString(this.font, ellipsize(warn, available),
+                    this.left + 4, this.nowPlayingY, 0xFF6B6B, true);
+        } else if (uploadStatus != null) {
             int available = this.panelW - 8 - (time == null ? 0 : timeWidth + 6);
             context.drawString(this.font, ellipsize(uploadStatus, available),
                     this.left + 4, this.nowPlayingY, 0xFFD37A, true);

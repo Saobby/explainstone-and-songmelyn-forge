@@ -26,6 +26,8 @@ import net.minecraft.resources.ResourceKey;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
+import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.network.chat.Component;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.storage.LevelResource;
 import org.slf4j.Logger;
@@ -37,6 +39,7 @@ import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.util.UUID;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -86,11 +89,27 @@ public final class SpeakerRegistry {
         }
     }
 
+    /**
+     * 维度 → (坐标 → 刚放下这座音响的玩家 + 截止时间)。
+     *
+     * <p>只为了处理一种情况：玩家用"创造模式中键取方块"那种**带 NBT 的方块**直接放下一个
+     * 已经是收信模式的音响，而它要加入的频道已经满了。方块 NBT 是在
+     * {@code BlockItem#updateCustomBlockEntityTag} 里写入的，晚于 {@code setPlacedBy}，
+     * 所以只能在放置时先记下"谁放的"，等第一个 tick 登记失败时再回头找他。 喵
+     */
+    private static final Map<ResourceKey<Level>, Map<BlockPos, Placer>> PLACERS = new HashMap<>();
+    /** 放置记录的有效期（毫秒）：超过这个时间还没登记成功就不再算"刚放下" 喵 */
+    private static final long PLACER_TTL_MILLIS = 10_000L;
+
+    private record Placer(UUID player, long expiresAt) {
+    }
+
     // ------------------------------------------------------------ 读写存档 喵
     /** 服务端启动（世界加载前）读登记表 喵 */
     public static synchronized void load(MinecraftServer server) {
         SPEAKERS.clear();
         REVISIONS.clear();
+        PLACERS.clear();
         storagePath = null;
         dirty = false;
         if (server == null) {
@@ -205,14 +224,58 @@ public final class SpeakerRegistry {
         boolean ok = register(level, pos, be.getChannel(), be.getVolume(), facing);
         if (ok) {
             be.setSpeakerRegistered(true);
+            takePlacer(level, pos);   // 登记成功了，放置记录就没用了 喵
             return;
         }
         if (!be.isSpeakerRegisterRejected()) {
             be.setSpeakerRegisterRejected(true);
+            // 直接放置了带 NBT 的收信音响、而频道已经满了：强制回自播放，并在聊天栏告诉放置者 喵
+            UUID placer = takePlacer(level, pos);
+            if (placer != null) {
+                int channel = be.getChannel();
+                be.setReceiveMode(false);
+                ServerPlayer player = level.getServer() == null ? null
+                        : level.getServer().getPlayerList().getPlayer(placer);
+                if (player != null) {
+                    player.displayClientMessage(Component.translatable(
+                            "message.explainstone.channel.full.reset",
+                            ExplainstoneServerConfig.maxSpeakersPerChannel()), false);
+                }
+                LOGGER.info("{} 是直接放置的收信音响，但频道 {} 已满 {}，已重置为自播放",
+                        pos.toShortString(), channel, ExplainstoneServerConfig.maxSpeakersPerChannel());
+                return;
+            }
             LOGGER.warn("频道 {} 的收信音响已达上限 {}，{} 不会参与同步播放",
                     be.getChannel(), ExplainstoneServerConfig.maxSpeakersPerChannel(),
                     pos.toShortString());
         }
+    }
+
+    /** 记录"这个坐标刚被某个玩家放下"（放置时调用，10 秒内有效） 喵 */
+    public static synchronized void rememberPlacer(ServerLevel level, BlockPos pos, UUID player) {
+        if (level == null || pos == null || player == null) {
+            return;
+        }
+        Map<BlockPos, Placer> map = PLACERS.computeIfAbsent(level.dimension(), key -> new HashMap<>());
+        long now = System.currentTimeMillis();
+        map.entrySet().removeIf(entry -> entry.getValue().expiresAt() < now);
+        map.put(pos.immutable(), new Placer(player, now + PLACER_TTL_MILLIS));
+    }
+
+    /** 取出并清掉"刚放下这座音响的玩家"；没有或已过期返回 {@code null}（用完即弃，只提示一次） 喵 */
+    public static synchronized UUID takePlacer(ServerLevel level, BlockPos pos) {
+        if (level == null || pos == null) {
+            return null;
+        }
+        Map<BlockPos, Placer> map = PLACERS.get(level.dimension());
+        if (map == null) {
+            return null;
+        }
+        Placer placer = map.remove(pos);
+        if (placer == null || placer.expiresAt() < System.currentTimeMillis()) {
+            return null;
+        }
+        return placer.player();
     }
 
     /** 登记/更新一条收信音响；频道满了（且不是更新自己）返回 false 喵 */
