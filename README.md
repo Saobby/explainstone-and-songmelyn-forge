@@ -113,17 +113,21 @@ Port of the Fabric 1.21.1 edition of **Explainstone / Songmelyn / Broadcast Tran
   all start in the same mixer cycle again); volume or facing changes never rebuild anything.
   Corrections are no longer driven by reading `AL_SEC_OFFSET` back: that
   readout is only accurate to a few dozen milliseconds, and chasing it made things worse.
-  The number of speakers per channel is capped by `maxSpeakersPerChannel` (server config):
-  refusing the change in the speaker screen shows the hint *inside* the screen, while placing
-  a copy of a receiving speaker (creative pick-block) into a full channel tells you in chat
-  and forces that block back to self-playback.
+  The number of speakers per channel is capped by `maxSpeakersPerChannel` (server config). Because
+  speakers link to a transmitter **through its channel**, that number is also the maximum number of
+  speakers one transmitter can drive; raise it up to 1024 and raise the client's `maxVoices` to at
+  least the total number of speakers playing at once (the client logs a warning and skips the extra
+  sources otherwise). Refusing the change in the speaker screen shows the hint *inside* the screen,
+  while placing a copy of a receiving speaker (creative pick-block) into a full channel tells you in
+  chat and forces that block back to self-playback.
 * Note particles float above a speaker while **it** is emitting sound (its own volume > 0),
   not while *you* can hear it: the transmitter's global volume and distance attenuation change
   how loud it reaches you, but not whether it is playing. The **number** of notes scales with
   that same volume — at 100 % a speaker emits a steady stream, at 20 % it only now and then
   drops a single note — and only speakers within 48 blocks spawn particles, purely to avoid
-  wasting render work on far-away ones. A per-tick budget (32 notes for the whole client)
-  keeps a dense cluster of loud speakers from flooding the screen.
+  wasting render work on far-away ones. A per-tick budget (128 notes for the whole client by
+  default — enough for one full default channel of 64 speakers at 100 %) keeps a dense cluster
+  of loud speakers from flooding the screen; lower it if that ever costs you frames.
 * One volume slider controls both loudness and audible range:
   `effective range = audibleRangeAtFullVolume × volume / 100`. Setting it to 0 mutes the
   speaker, so there is no separate sound on/off toggle. Local playback vs. receive mode is
@@ -188,14 +192,20 @@ Two separate Forge config files:
 
 | File | Type | Where | Holds |
 |---|---|---|---|
-| `explainstone-server.toml` | `SERVER` | single player: `saves/<world>/serverconfig/`, dedicated: `<server>/world/serverconfig/` | broadcast permissions, import limits, optimistic-import quotas, anti-abuse buckets, `audibleRangeAtFullVolume` |
-| `explainstone-client.toml` | `CLIENT` | `config/` | front/back attenuation, occlusion, reverb, which import file picker to use |
+| `explainstone-server.toml` | `SERVER` | single player: `saves/<world>/serverconfig/`, dedicated: `<server>/world/serverconfig/` | broadcast permissions, import limits, optimistic-import quotas, anti-abuse buckets, `audibleRangeAtFullVolume`, `maxSpeakersPerChannel`, `maxSpeakerEntries` |
+| `explainstone-client.toml` | `CLIENT` | `config/` | front/back attenuation, occlusion, reverb, which import file picker to use, note-particle caps (`noteParticleDistance`, `notesPerTickBudget`), `maxVoices`, `driftResyncSeconds`, `timelineJumpMillis` |
 
 The server file is owned by the server and **synced to clients on login**, so
 `audibleRangeAtFullVolume` no longer has to be kept in sync by hand. The client file only
 affects local listening and the import UI; it never changes the shared timeline.
 (The old `config/explainstone-common.toml` is no longer read — its values live in the two
 files above now.)
+
+Every cap the mod enforces is in one of those two files — the particle limits, the number of
+OpenAL sources, the sync fallback thresholds, how many receiving speakers a channel may hold,
+how many registry entries are persisted, and how long the "who placed this" record lives. The
+only values that stay compiled in are binary-protocol invariants (action ids, chunk sizes,
+decode guards), because both ends must agree on them byte for byte.
 
 ```toml
 # ---------------- explainstone-server.toml ----------------
@@ -205,6 +215,9 @@ broadcastRequiresOp = false
 audibleRangeAtFullVolume = 40
 # Audible range in blocks at 100% volume, scaled linearly with volume.
 # Synced to clients automatically, so both sides always agree.
+# Maximum receiving speakers per channel (= per transmitter: speakers link through the
+# channel). Raise the client's maxVoices at least as high if you go above ~256.
+maxSpeakersPerChannel = 64
 # Imported ogg size limit in MiB (1-100).
 maxAudioFileMb = 10
 # Single-track duration limit in seconds (1-7200).
@@ -233,6 +246,9 @@ audioRequestRefillPerSecond = 6
 # Audio download traffic bucket per player: burst in MiB and refill in MiB/s.
 audioDownloadBurstMb = 128
 audioDownloadMbPerSecond = 8
+# --- Speaker registry ---
+# How many receiving-speaker entries are kept in <world>/explainstone/speakers.nbt.
+maxSpeakerEntries = 65536
 ```
 
 ```toml
@@ -253,6 +269,18 @@ reverbWet = 0.8
 # "system"  = native dialog first, in-game browser as fallback;
 # "in-game" = always use the in-game file browser.
 filePicker = "system"
+# --- Note particles above playing speakers ---
+# Maximum distance in blocks (0 disables the particles entirely).
+noteParticleDistance = 48.0
+# Hard cap on notes per tick for the whole client (dense clusters cannot flood the screen).
+notesPerTickBudget = 128
+# --- Local playback resources and sync fallbacks ---
+# Maximum number of OpenAL sources kept alive at once.
+maxVoices = 256
+# Force a re-align when a voice drifts more than this many seconds from the timeline.
+driftResyncSeconds = 2.0
+# Incoming position differing by more than this many milliseconds counts as a seek.
+timelineJumpMillis = 2000
 ```
 
 The client pre-checks the import limits it receives from the server: it checks file size,

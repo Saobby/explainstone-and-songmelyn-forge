@@ -149,23 +149,24 @@ public final class SpeakerAudio {
     private static final Set<Integer> REBUILD_CHANNELS = new HashSet<>();
 
     /**
-     * 音符粒子的距离上限（格）。
+     * 本 tick 已经冒掉了多少颗音符（{@code tickSounds} 开头重置）。
      *
-     * <p>粒子是"这座音响在放音"的视觉提示，判据只看它自己的音量，与玩家听到的声音大小无关
-     * （玩家听到的还要乘距离衰减和全局音量）；这个距离只是为了避免给几百格外的音响也生成粒子。 喵
+     * <p>粒子的距离上限和每 tick 总上限来自客户端配置
+     * （{@code ExplainstoneClientConfig.noteParticleDistance()} / {@code notesPerTickBudget()}）；
+     * 每座音响在满音量时的密度是固定的 {@link #NOTES_PER_TICK_AT_FULL_VOLUME}。
+     * 粒子是"这座音响在放音"的视觉提示，判据只看它自己的音量，
+     * 与玩家听到的声音大小无关（玩家听到的还要乘距离衰减和全局音量）。 喵
      */
-    private static final double NOTE_PARTICLE_DISTANCE = 48.0;
-    /** 音量 100 时每 tick 期望生成多少颗音符：音量越小冒得越稀（线性缩放） 喵 */
-    private static final double NOTES_PER_TICK_AT_FULL_VOLUME = 2.0;
-    /** 每 tick 全客户端最多冒多少颗音符：防止几十上百个音响挤在一起时粒子爆炸 喵 */
-    private static final int NOTES_PER_TICK_BUDGET = 32;
-    /** 本 tick 已经冒掉了多少颗（{@code tickSounds} 开头重置） 喵 */
     private static int notesThisTick;
+    /** 音量 100% 时每 tick 每座音响的音符数：音量越小越稀（线性缩放），小数部分按概率补 喵 */
+    private static final double NOTES_PER_TICK_AT_FULL_VOLUME = 2.0;
 
     /** 界面操作被拒绝时的提示：坐标 → {截止时间, 上限}；音响界面读取后自己显示，不进聊天栏 喵 */
     private static final Map<BlockPos, long[]> CHANNEL_FULL_NOTICES = new HashMap<>();
-    /** 提示显示时长（毫秒） 喵 */
+    /** "频道已满"提示在界面里显示多久（毫秒） 喵 */
     private static final long NOTICE_MILLIS = 5_000L;
+    /** 频道 → 上次"音源不够用"的提示内容（同样的数字只提示一次，避免每 tick 刷日志） 喵 */
+    private static final Map<Integer, String> LAST_VOICE_CAP_WARN = new HashMap<>();
 
     /**
      * 一个频道的收信音响列表（位置 / 音量 / 朝向）。
@@ -280,8 +281,9 @@ public final class SpeakerAudio {
         if (SPEAKER_LISTS.isEmpty()) {
             return;
         }
+        // 本地 source 上限 = 服务端配置的频道上限与 wire 上限取小（客户端配置 maxVoices 另有硬兜底） 喵
         int limit = Math.min(ExplainstoneServerConfig.maxSpeakersPerChannel(),
-                SpeakerPayloads.MAX_SPEAKERS_PER_MESSAGE);
+                SpeakerPayloads.maxSpeakersPerMessage());
         Iterator<Map.Entry<Integer, SpeakerList>> iterator = SPEAKER_LISTS.entrySet().iterator();
         while (iterator.hasNext()) {
             Map.Entry<Integer, SpeakerList> listEntry = iterator.next();
@@ -299,11 +301,14 @@ public final class SpeakerAudio {
                 continue;   // 频道暂停：保留列表，voice 统一停掉 喵
             }
             int broadcastVolume = info.volumePercent();
+            int maxVoices = ExplainstoneClientConfig.maxVoices();
             int size = Math.min(list.size(), limit);
+            int skippedByVoiceCap = 0;
             for (int i = 0; i < size; i++) {
                 BlockPos pos = BlockPos.of(list.positions()[i]);
-                if (!VOICES.containsKey(pos) && VOICES.size() >= MAX_VOICES) {
-                    continue;   // 本地 source 上限保护（正常不会触发：服务端已经限流） 喵
+                if (!VOICES.containsKey(pos) && VOICES.size() >= maxVoices) {
+                    skippedByVoiceCap++;   // 本机音源不够：调大 explainstone-client.toml 的 maxVoices 喵
+                    continue;
                 }
                 int volume = list.volumes().length > i ? list.volumes()[i] : 100;
                 int facingOrdinal = list.facings().length > i ? list.facings()[i] : 2;
@@ -321,6 +326,9 @@ public final class SpeakerAudio {
                 // 根本看不见的音响生成粒子 喵
                 spawnNotesIfNear(world, pos, ear, effectiveVolume);
             }
+            if (skippedByVoiceCap > 0) {
+                warnVoiceCap(channel, skippedByVoiceCap, size, maxVoices);
+            }
         }
     }
 
@@ -330,6 +338,24 @@ public final class SpeakerAudio {
         CHANNEL_VOICES.clear();
         REBUILD_CHANNELS.clear();
         CHANNEL_FULL_NOTICES.clear();
+        LAST_VOICE_CAP_WARN.clear();
+    }
+
+    /**
+     * 服务端允许的频道音响数超过了本机 {@code maxVoices}：多出来的那些**不会有 source**，也就不会响。
+     *
+     * <p>这是"把 maxSpeakersPerChannel 调大、但没跟着调 maxVoices"时最容易踩的坑，
+     * 所以只在数字变化时提示一次，并在日志里给出要调多少。 喵
+     */
+    private static void warnVoiceCap(int channel, int skipped, int total, int maxVoices) {
+        String key = skipped + "/" + total + "/" + maxVoices;
+        if (key.equals(LAST_VOICE_CAP_WARN.put(channel, key))) {
+            return;
+        }
+        LOGGER.warn("频道 {} 的收信音响有 {} 个，但本机 maxVoices={} 不够，{} 个没有创建音源（不会发声）；"
+                        + "请把 config/explainstone-client.toml 里的 maxVoices 调到至少 {}"
+                        + "（同时播多个频道时要按总数算）。",
+                channel, total, maxVoices, skipped, total);
     }
 
     private static final Map<BlockPos, PartialPlaylist> PARTIAL_SESSIONS = new HashMap<>();
@@ -339,24 +365,22 @@ public final class SpeakerAudio {
     /** 防御恶意服务端：最多同时维护多少个会话/频道/重组缓存 喵 */
     private static final int MAX_SESSIONS = 4096;
     private static final int MAX_BROADCASTS = 1024;
-    /** 本地最多同时存在多少个 OpenAL source（服务端已经按频道限流，这里是硬兜底） 喵 */
-    private static final int MAX_VOICES = 128;
     private static final int MAX_PARTIAL_SESSIONS = 256;
     private static final int MAX_PARTIAL_BROADCASTS = 1024;
     /**
-     * 时间轴跳变阈值（毫秒）：服务端推来的进度和本地推算差了这么多，就认为不是"正常往前走"，
+     * 同步诊断日志限流：频道 → 上次记录时间（ms）。
+     *
+     * <p>时间轴跳变阈值、播放中允许的进度偏差都来自客户端配置
+     * （{@code ExplainstoneClientConfig.timelineJumpMillis()} / {@code driftResyncSeconds()}）：
+     *
+     * <p>跳变阈值：服务端推来的进度和本地推算差了这么多，就认为不是"正常往前走"，
      * 而是 seek / 上一曲 / 下一曲 / 换模式。这种跳变必须让**同一组的所有音响一起**重新对齐，
      * 否则各自按容差判断，会出现"A 跳了 B 没跳"，两个音响永久差几十~几百毫秒（合唱感）。
-     * 取 2 秒是为了远高于"播放位置读数"的噪声（几十毫秒），不会因为正常的时间轴抖动误触发。 喵
-     */
-    private static final long JUMP_MILLIS = 2_000L;
-    /**
-     * 播放中允许的进度偏差（秒）：超过才认为"这个音源真的跑飞了"（比如日志里出现过的偏离 226 秒），
+     *
+     * <p>进度偏差：超过才认为"这个音源真的跑飞了"（比如日志里出现过的偏离 226 秒），
      * 把它单独重启回来。**不要**用几十毫秒级的容差去纠偏：AL_SEC_OFFSET 本身的噪声就有几十毫秒，
      * 按它硬拽只会制造新的不同步。 喵
      */
-    private static final double DRIFT_SECONDS = 2.0;
-    /** 同步诊断日志限流：频道 → 上次记录时间（ms） 喵 */
     private static final Map<Integer, Long> LAST_SYNC_LOG_MS = new HashMap<>();
 
     /**
@@ -721,14 +745,22 @@ public final class SpeakerAudio {
      * 和全局音量，用它当判据会导致全局音量调低后只有贴脸才有粒子。 喵
      */
     private static void spawnNotesIfNear(ClientLevel world, BlockPos pos, Vec3 ear, int volumePercent) {
-        if (volumePercent <= 0 || notesThisTick >= NOTES_PER_TICK_BUDGET) {
+        if (volumePercent <= 0) {
             return;
+        }
+        int budget = ExplainstoneClientConfig.notesPerTickBudget();
+        if (notesThisTick >= budget) {
+            return;
+        }
+        double maxDistance = ExplainstoneClientConfig.noteParticleDistance();
+        if (maxDistance <= 0.0) {
+            return;   // 距离上限配成 0：完全不冒粒子 喵
         }
         double dx = ear.x - (pos.getX() + 0.5);
         double dy = ear.y - (pos.getY() + 0.5);
         double dz = ear.z - (pos.getZ() + 0.5);
-        if (dx * dx + dy * dy + dz * dz > NOTE_PARTICLE_DISTANCE * NOTE_PARTICLE_DISTANCE) {
-            return;   // 太远、根本看不见，冒了也是白渲染 喵
+        if (dx * dx + dy * dy + dz * dz > maxDistance * maxDistance) {
+            return;   // 太远、根本看不见，冒了也是白渲染（距离上限可在客户端配置里改） 喵
         }
         // 音量 → 数量：期望值 = 满音量的数量 × 音量/100，小数部分按概率补一颗。
         // 于是低音量是"偶尔冒一颗"、高音量是"成串地冒"，而不是只改冒的间隔 喵
@@ -737,7 +769,7 @@ public final class SpeakerAudio {
         if (world.random.nextDouble() < expected - count) {
             count++;
         }
-        count = Math.min(count, NOTES_PER_TICK_BUDGET - notesThisTick);
+        count = Math.min(count, budget - notesThisTick);
         for (int i = 0; i < count; i++) {
             spawnNote(world, pos);
         }
@@ -1507,7 +1539,7 @@ public final class SpeakerAudio {
                 }
                 // 播放中读回来的位置有几十毫秒噪声（OpenAL 按混音周期刷新），只做"大漂移"兜底；
                 // 起播本身已经在停着的音源上精确 seek 过，不再按读数做小幅度拉扯 喵
-                if (Math.abs(current - expected) > DRIFT_SECONDS) {
+                if (Math.abs(current - expected) > ExplainstoneClientConfig.driftResyncSeconds()) {
                     this.realignScope = 2;
                     this.realignReason = 2;
                 }
@@ -2003,7 +2035,8 @@ public final class SpeakerAudio {
     private static boolean timelineJumped(long localElapsedMillis, long incomingElapsedMillis,
                                           boolean localPaused, boolean incomingPaused) {
         return localPaused != incomingPaused
-                || Math.abs(incomingElapsedMillis - localElapsedMillis) > JUMP_MILLIS;
+                || Math.abs(incomingElapsedMillis - localElapsedMillis)
+                        > ExplainstoneClientConfig.timelineJumpMillis();
     }
 
     /** 讲解石本地会话的新跳变代数：跳变就 +1，所有音响一起重新对齐 喵 */

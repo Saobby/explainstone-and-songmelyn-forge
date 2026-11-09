@@ -48,11 +48,20 @@ public final class ExplainstoneServerConfig {
      * <p>同频道的音响会在客户端**同时**创建并起播（这样它们必然同步），
      * 所以需要一个上限，避免有人布几百个音响把客户端混音和内存拖垮。 喵
      */
+    /**
+     * 一个频道最多允许多少个收信音响（= 一个发信器最多能带上多少个音响，因为连接是按频道算的）。
+     *
+     * <p>同频道的音响会在客户端**同时**创建并起播（这样它们必然同步），
+     * 所以需要一个上限，避免有人布几百个音响把客户端混音和内存拖垮。
+     * 调大它时记得同时调大客户端的 {@code maxVoices}（那里是整个客户端音源总数上限）。 喵
+     */
     public static final ForgeConfigSpec.IntValue MAX_SPEAKERS_PER_CHANNEL = BUILDER
-            .comment("Maximum number of receiving speakers per channel.",
+            .comment("Maximum number of receiving speakers per channel (= per transmitter, since",
+                    "speakers link to a transmitter through its channel, not by distance).",
                     "All speakers of a channel are started together on the client (that is what keeps",
-                    "them in sync), so this bounds the number of OpenAL sources one channel may use.")
-            .defineInRange("maxSpeakersPerChannel", 64, 1, 256);
+                    "them in sync), so this bounds the number of OpenAL sources one channel may use.",
+                    "If you raise it, raise the client's maxVoices as well (that is the per-client total).")
+            .defineInRange("maxSpeakersPerChannel", 64, 1, 1024);
 
     /** 单个导入音频文件大小上限（MB） 喵 */
     public static final ForgeConfigSpec.IntValue MAX_AUDIO_FILE_MB = BUILDER
@@ -136,8 +145,13 @@ public final class ExplainstoneServerConfig {
             .comment("Audio download budget refilled per second per player, in MiB/s.")
             .defineInRange("audioDownloadMbPerSecond", 8, 1, 1024);
 
-    public static final ForgeConfigSpec SPEC = BUILDER.build();
+    /** 收信音响登记表最多保存多少条（防御异常存档 / 超大服） 喵 */
+    public static final ForgeConfigSpec.IntValue MAX_SPEAKER_ENTRIES = BUILDER
+            .comment("Maximum number of receiving-speaker entries kept in <world>/explainstone/speakers.nbt.",
+                    "Entries beyond this are dropped when reading and not written when saving.")
+            .defineInRange("maxSpeakerEntries", 65536, 256, 1048576);
 
+    public static final ForgeConfigSpec SPEC = BUILDER.build();
     private ExplainstoneServerConfig() {
     }
 
@@ -243,5 +257,10 @@ public final class ExplainstoneServerConfig {
     /** 音频下载流量每秒回填（MB/s） 喵 */
     public static double audioDownloadMbPerSecond() {
         return AUDIO_DOWNLOAD_MB_PER_SECOND.get();
+    }
+
+    /** 收信音响登记表最多保存多少条 喵 */
+    public static int maxSpeakerEntries() {
+        return MAX_SPEAKER_ENTRIES.get();
     }
 }

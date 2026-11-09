@@ -12,6 +12,7 @@
  */
 package com.ginka.explainstone.speaker;
 
+import com.ginka.explainstone.ExplainstoneServerConfig;
 import net.minecraft.core.BlockPos;
 import net.minecraft.network.FriendlyByteBuf;
 
@@ -79,6 +80,11 @@ public final class SpeakerPayloads {
     public static final int MAX_PLAYLIST_BITS_BYTES = 4096;
     /** 一条 ChannelSpeakers 最多带多少个音响（和配置上限的硬上界一致） 喵 */
     public static final int MAX_SPEAKERS_PER_MESSAGE = 256;
+
+    /** 一条 ChannelSpeakers 最多带多少个音响：跟随可配置的频道上限，并留一个兜底下界 喵 */
+    public static int maxSpeakersPerMessage() {
+        return Math.max(MAX_SPEAKERS_PER_MESSAGE, ExplainstoneServerConfig.maxSpeakersPerChannel());
+    }
 
     private SpeakerPayloads() {
     }
@@ -427,7 +433,7 @@ public final class SpeakerPayloads {
             int channel = buf.readVarInt();
             long revision = buf.readLong();
             int count = buf.readVarInt();
-            if (count < 0 || count > MAX_SPEAKERS_PER_MESSAGE) {
+            if (count < 0 || count > maxSpeakersPerMessage()) {
                 throw new io.netty.handler.codec.DecoderException("ChannelSpeakers count out of range: " + count);
             }
             long[] positions = new long[count];

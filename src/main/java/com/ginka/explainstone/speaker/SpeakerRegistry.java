@@ -65,8 +65,6 @@ import java.util.Map;
 public final class SpeakerRegistry {
     private static final Logger LOGGER = LoggerFactory.getLogger("explainstone-speakers");
     private static final int FORMAT_VERSION = 1;
-    /** 防御异常存档：最多读入多少条登记 喵 */
-    private static final int MAX_ENTRIES = 65_536;
 
     /** 维度 → (坐标 → 登记信息) 喵 */
     private static final Map<ResourceKey<Level>, Map<BlockPos, Entry>> SPEAKERS = new HashMap<>();
@@ -95,10 +93,11 @@ public final class SpeakerRegistry {
      * <p>只为了处理一种情况：玩家用"创造模式中键取方块"那种**带 NBT 的方块**直接放下一个
      * 已经是收信模式的音响，而它要加入的频道已经满了。方块 NBT 是在
      * {@code BlockItem#updateCustomBlockEntityTag} 里写入的，晚于 {@code setPlacedBy}，
-     * 所以只能在放置时先记下"谁放的"，等第一个 tick 登记失败时再回头找他。 喵
+     * 所以只能在放置时先记下"谁放的"，等第一个 tick 登记失败时再回头找他。
+     * 记录只保留 {@link #PLACER_TTL_MILLIS}（10 秒）。 喵
      */
     private static final Map<ResourceKey<Level>, Map<BlockPos, Placer>> PLACERS = new HashMap<>();
-    /** 放置记录的有效期（毫秒）：超过这个时间还没登记成功就不再算"刚放下" 喵 */
+    /** "刚放下这座音响的玩家"记录的有效期（毫秒）：超过就不算"刚放下" 喵 */
     private static final long PLACER_TTL_MILLIS = 10_000L;
 
     private record Placer(UUID player, long expiresAt) {
@@ -130,7 +129,8 @@ public final class SpeakerRegistry {
                 return;
             }
             ListTag list = root.getList("speakers", Tag.TAG_COMPOUND);
-            for (int i = 0; i < list.size() && i < MAX_ENTRIES; i++) {
+            int maxEntries = ExplainstoneServerConfig.maxSpeakerEntries();
+            for (int i = 0; i < list.size() && i < maxEntries; i++) {
                 CompoundTag tag = list.getCompound(i);
                 ResourceLocation id = ResourceLocation.tryParse(tag.getString("dim"));
                 if (id == null) {
@@ -165,9 +165,10 @@ public final class SpeakerRegistry {
             }
             ListTag list = new ListTag();
             int written = 0;
+            int maxEntries = ExplainstoneServerConfig.maxSpeakerEntries();
             for (Map.Entry<ResourceKey<Level>, Map<BlockPos, Entry>> dimension : SPEAKERS.entrySet()) {
                 for (Map.Entry<BlockPos, Entry> speaker : dimension.getValue().entrySet()) {
-                    if (written++ >= MAX_ENTRIES) {
+                    if (written++ >= maxEntries) {
                         break;
                     }
                     CompoundTag tag = new CompoundTag();

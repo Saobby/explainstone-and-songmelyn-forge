@@ -85,10 +85,47 @@ public final class ExplainstoneClientConfig {
                     "Values: system, in-game. Client-side only.")
             .defineInList("filePicker", "system", List.of("system", "in-game"));
 
+    // ------------------------------------------------------------ 表现与资源上限 喵
+    /** 音符粒子的距离上限（格）：更远的音响不冒粒子（纯渲染上限，不影响听觉） 喵 */
+    public static final ForgeConfigSpec.DoubleValue NOTE_PARTICLE_DISTANCE = BUILDER
+            .comment("Maximum distance (in blocks) at which a playing speaker still emits note particles.",
+                    "Render/perf cap only; it never affects what you hear. 0 disables the particles.")
+            .defineInRange("noteParticleDistance", 48.0, 0.0, 256.0);
+
+    /** 每 tick 全客户端最多生成多少颗音符（防止密集音响群把屏幕糊满/掉帧） 喵 */
+    public static final ForgeConfigSpec.IntValue NOTES_PER_TICK_BUDGET = BUILDER
+            .comment("Hard cap on note particles spawned per tick for this client.",
+                    "Speakers that do not fit in the budget simply skip their particles for that tick.",
+                    "Default 128 = one full default channel (64 speakers x 2 notes at 100% volume).",
+                    "Lower it if a dense cluster of loud speakers costs you frames.")
+            .defineInRange("notesPerTickBudget", 128, 0, 2000);
+
+    /** 本机同时最多保留多少个 OpenAL 音源 喵 */
+    public static final ForgeConfigSpec.IntValue MAX_VOICES = BUILDER
+            .comment("Maximum number of OpenAL sources this client keeps alive at once.",
+                    "Each playing/queued speaker occupies one source; raise it for very dense setups.",
+                    "It must be at least the total number of receiving speakers playing at the same",
+                    "time (e.g. maxSpeakersPerChannel x number of simultaneously active channels);",
+                    "otherwise the extra speakers are skipped and the client logs a warning.")
+            .defineInRange("maxVoices", 256, 4, 4096);
+
+    /** 音源与时间轴偏差超过多少秒才强制重新对齐（兜底，正常播放不会触发） 喵 */
+    public static final ForgeConfigSpec.DoubleValue DRIFT_RESYNC_SECONDS = BUILDER
+            .comment("Force a re-align when a voice drifts more than this many seconds from the timeline.",
+                    "Fallback for audio-device hiccups only; normal playback never comes close to it.")
+            .defineInRange("driftResyncSeconds", 2.0, 0.1, 120.0);
+
+    /** 服务端推来的进度和本地推算差多少毫秒以上就当成\"跳变\"（seek / 切歌） 喵 */
+    public static final ForgeConfigSpec.IntValue TIMELINE_JUMP_MILLIS = BUILDER
+            .comment("Treat an incoming position that differs from the local timeline by more than this",
+                    "many milliseconds as a seek (whole group jumps together).")
+            .defineInRange("timelineJumpMillis", 2000, 50, 60000);
+
     public static final ForgeConfigSpec SPEC = BUILDER.build();
 
     private ExplainstoneClientConfig() {
     }
+
     // ------------------------------------------------------------ 取值入口 喵
     /** 正后方音量倍率 喵 */
     public static double rearVolumeFactor() {
@@ -134,5 +171,43 @@ public final class ExplainstoneClientConfig {
             // 配置还没加载/被改坏时按默认的 system 走 喵
             return false;
         }
+    }
+
+    // ------------------------------------------------------------ 表现与资源上限取值入口 喵
+    /**
+     * 读配置并兜底：这些值在渲染/音频线程上每 tick 读，配置没加载好时不能让游戏崩。 喵
+     */
+    private static <T> T orDefault(ForgeConfigSpec.ConfigValue<T> value, T fallback) {
+        try {
+            T current = value.get();
+            return current == null ? fallback : current;
+        } catch (RuntimeException e) {
+            return fallback;
+        }
+    }
+
+    /** 音符粒子距离上限（格）；0 = 不冒粒子 喵 */
+    public static double noteParticleDistance() {
+        return orDefault(NOTE_PARTICLE_DISTANCE, 48.0);
+    }
+
+    /** 每 tick 全客户端的音符数上限 喵 */
+    public static int notesPerTickBudget() {
+        return orDefault(NOTES_PER_TICK_BUDGET, 128);
+    }
+
+    /** 本机同时保留的 OpenAL 音源上限 喵 */
+    public static int maxVoices() {
+        return orDefault(MAX_VOICES, 256);
+    }
+
+    /** 偏差超过多少秒就强制重新对齐 喵 */
+    public static double driftResyncSeconds() {
+        return orDefault(DRIFT_RESYNC_SECONDS, 2.0);
+    }
+
+    /** 进度差多少毫秒算"跳变" 喵 */
+    public static long timelineJumpMillis() {
+        return orDefault(TIMELINE_JUMP_MILLIS, 2000);
     }
 }
