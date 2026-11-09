@@ -155,6 +155,12 @@ public final class SpeakerAudio {
      * （玩家听到的还要乘距离衰减和全局音量）；这个距离只是为了避免给几百格外的音响也生成粒子。 喵
      */
     private static final double NOTE_PARTICLE_DISTANCE = 48.0;
+    /** 音量 100 时每 tick 期望生成多少颗音符：音量越小冒得越稀（线性缩放） 喵 */
+    private static final double NOTES_PER_TICK_AT_FULL_VOLUME = 2.0;
+    /** 每 tick 全客户端最多冒多少颗音符：防止几十上百个音响挤在一起时粒子爆炸 喵 */
+    private static final int NOTES_PER_TICK_BUDGET = 32;
+    /** 本 tick 已经冒掉了多少颗（{@code tickSounds} 开头重置） 喵 */
+    private static int notesThisTick;
 
     /** 界面操作被拒绝时的提示：坐标 → {截止时间, 上限}；音响界面读取后自己显示，不进聊天栏 喵 */
     private static final Map<BlockPos, long[]> CHANNEL_FULL_NOTICES = new HashMap<>();
@@ -598,6 +604,8 @@ public final class SpeakerAudio {
             lastTickNanos = nowNanos;
         }
         clock++;
+        // 每个 tick 重置音符粒子预算（见 spawnNotesIfNear） 喵
+        notesThisTick = 0;
         // 时间轴按真实时间前进：音频就是按真实时间播的，两者同速才不会互相纠正 喵
         timelineNanos += Math.max(0L, nowNanos - lastTickNanos);
         lastTickNanos = nowNanos;
@@ -707,13 +715,13 @@ public final class SpeakerAudio {
     }
 
     /**
-     * 音响在放音（音量 > 0）且离玩家不太远 → 冒音符。
+     * 音响在放音（音量 > 0）且离玩家不太远 → 在它头顶冒音符，**音量越大冒得越多**。
      *
      * <p>判据是"这座音响实际在放的音量"，**不是**玩家听到的音量：玩家听到的音量还要乘距离衰减
      * 和全局音量，用它当判据会导致全局音量调低后只有贴脸才有粒子。 喵
      */
     private static void spawnNotesIfNear(ClientLevel world, BlockPos pos, Vec3 ear, int volumePercent) {
-        if (volumePercent <= 0) {
+        if (volumePercent <= 0 || notesThisTick >= NOTES_PER_TICK_BUDGET) {
             return;
         }
         double dx = ear.x - (pos.getX() + 0.5);
@@ -722,25 +730,28 @@ public final class SpeakerAudio {
         if (dx * dx + dy * dy + dz * dz > NOTE_PARTICLE_DISTANCE * NOTE_PARTICLE_DISTANCE) {
             return;   // 太远、根本看不见，冒了也是白渲染 喵
         }
-        spawnNotes(world, pos);
+        // 音量 → 数量：期望值 = 满音量的数量 × 音量/100，小数部分按概率补一颗。
+        // 于是低音量是"偶尔冒一颗"、高音量是"成串地冒"，而不是只改冒的间隔 喵
+        double expected = NOTES_PER_TICK_AT_FULL_VOLUME * Math.min(100, volumePercent) / 100.0;
+        int count = (int) expected;
+        if (world.random.nextDouble() < expected - count) {
+            count++;
+        }
+        count = Math.min(count, NOTES_PER_TICK_BUDGET - notesThisTick);
+        for (int i = 0; i < count; i++) {
+            spawnNote(world, pos);
+        }
+        notesThisTick += count;
     }
 
-    /** 正在出声的讲解石头顶冒音符（本地播放和收信模式都有） 喵 */
-    private static void spawnNotes(ClientLevel world, BlockPos pos) {
+    /** 在音响顶上方冒一颗音符（颜色由随机初速决定，MC 的 NOTE 粒子就是这么取色的） 喵 */
+    private static void spawnNote(ClientLevel world, BlockPos pos) {
         RandomSource random = world.random;
-        if (random.nextInt(5) != 0) {
-            return;
-        }
-        double x = pos.getX() + 0.5;
-        double y = pos.getY() + 1.05;
-        double z = pos.getZ() + 0.5;
-        for (int i = 0; i < 2; i++) {
-            world.addParticle(ParticleTypes.NOTE,
-                    x + (random.nextDouble() - 0.5) * 0.6,
-                    y,
-                    z + (random.nextDouble() - 0.5) * 0.6,
-                    random.nextDouble(), 0.0, 0.0);
-        }
+        world.addParticle(ParticleTypes.NOTE,
+                pos.getX() + 0.5 + (random.nextDouble() - 0.5) * 0.6,
+                pos.getY() + 1.05,
+                pos.getZ() + 0.5 + (random.nextDouble() - 0.5) * 0.6,
+                random.nextDouble(), 0.0, 0.0);
     }
 
     private static Voice voice(BlockPos pos) {
