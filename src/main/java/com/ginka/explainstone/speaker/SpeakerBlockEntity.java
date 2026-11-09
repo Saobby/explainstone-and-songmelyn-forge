@@ -59,6 +59,10 @@ public class SpeakerBlockEntity extends BlockEntity {
     private int ticksLeft;
     /** 是否已经把播放列表登记进服务端音频引用表 喵 */
     private boolean audioUsageRegistered;
+    /** 是否已登记进服务端的"收信音响登记表"（只用于状态显示与避免日志刷屏） 喵 */
+    private boolean speakerRegistered;
+    /** 因为频道已满被拒绝登记（同上，只提示一次） 喵 */
+    private boolean speakerRegisterRejected;
     /** sha1 → 时长提示（秒）：导入时客户端先给一个，服务端校验出真实值后覆盖 喵 */
     private final Map<String, Integer> durationHints = new HashMap<>();
 
@@ -246,6 +250,8 @@ public class SpeakerBlockEntity extends BlockEntity {
 
     public void setChannel(int channel) {
         this.channel = Math.floorMod(channel, 1000);
+        // 换了频道就要允许重新尝试登记（并重新提示） 喵
+        this.speakerRegisterRejected = false;
         this.sync();
     }
 
@@ -255,7 +261,28 @@ public class SpeakerBlockEntity extends BlockEntity {
 
     public void setReceiveMode(boolean receiveMode) {
         this.receiveMode = receiveMode;
+        // 换了模式就要允许重新尝试登记（并重新提示） 喵
+        this.speakerRegisterRejected = false;
         this.sync();
+    }
+
+    public boolean isSpeakerRegistered() {
+        return this.speakerRegistered;
+    }
+
+    public void setSpeakerRegistered(boolean registered) {
+        this.speakerRegistered = registered;
+        if (registered) {
+            this.speakerRegisterRejected = false;
+        }
+    }
+
+    public boolean isSpeakerRegisterRejected() {
+        return this.speakerRegisterRejected;
+    }
+
+    public void setSpeakerRegisterRejected(boolean rejected) {
+        this.speakerRegisterRejected = rejected;
     }
 
     public boolean isPaused() {

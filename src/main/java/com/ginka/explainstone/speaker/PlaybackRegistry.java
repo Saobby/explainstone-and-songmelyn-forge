@@ -34,7 +34,7 @@ import java.util.Random;
  * 服务端讲解石播放会话表。
  *
  * 服务端只保存「固定播放顺序 + 起始游戏 tick」，不关心音频时长：
- * 客户端拿到 elapsedTicks 后自己按每首歌的时长取模定位当前曲目和偏移，
+ * 客户端拿到 elapsedMillis 后自己按每首歌的时长取模定位当前曲目和偏移，
  * 因此所有人（以及离开范围后又回来的玩家）都会落在同一个时间点。 喵
  */
 public final class PlaybackRegistry {
@@ -64,7 +64,7 @@ public final class PlaybackRegistry {
                         session.mode.ordinal(), session.selected,
                         PlaybackPersistence.trackIds(session.timeline.sourceTracks()),
                         PlaybackPersistence.trackIds(session.timeline.order()),
-                        session.elapsedTicks(level)));
+                        session.elapsedMillis()));
             }
         }
         return out;
@@ -91,8 +91,8 @@ public final class PlaybackRegistry {
             return this.selected == selected && this.mode == mode;
         }
 
-        private long elapsedTicks(ServerLevel level) {
-            return this.timeline.elapsedTicks(level.getGameTime());
+        private long elapsedMillis() {
+            return this.timeline.elapsedMillis(TimelineClock.nowMillis());
         }
     }
 
@@ -191,7 +191,7 @@ public final class PlaybackRegistry {
         Map<BlockPos, Session> map = ACTIVE.computeIfAbsent(level.dimension(), k -> new HashMap<>());
         Session existing = map.get(pos);
         int range = Math.max(64, (int) Math.ceil(be.getEffectiveAudibleRange()) + 16);
-        long now = level.getGameTime();
+        long now = TimelineClock.nowMillis();
         if (existing != null) {
             if (!existing.sameSettings(selected, mode)) {
                 // 用户换了曲目/换了模式：语义上就是重新开始 喵
@@ -241,21 +241,21 @@ public final class PlaybackRegistry {
         if (order != null && !saved.matches(tracks, mode, selected)) {
             order = null;
         }
-        long startGameTime = now;
-        long pausedElapsed = 0L;
+        long startMillis = now;
+        long pausedElapsedMillis = 0L;
         boolean restored = order != null;
         if (order == null) {
             order = buildOrder(tracks, mode, selected);
         } else {
-            pausedElapsed = Math.max(0L, saved.elapsedTicks());
-            startGameTime -= pausedElapsed;
+            pausedElapsedMillis = Math.max(0L, saved.elapsedMillis());
+            startMillis -= pausedElapsedMillis;
         }
         if (order.isEmpty()) {
             stop(level, pos);
             return;
         }
         SessionTimeline timeline = new SessionTimeline(tracks, order,
-                SpeakerNetworking.trackDurations(level, be, order), startGameTime, paused, pausedElapsed);
+                SpeakerNetworking.trackDurations(level, be, order), startMillis, paused, pausedElapsedMillis);
         Session session = new Session(selected, mode, timeline, ++REVISION);
         session.range = range;
         map.put(pos.immutable(), session);
@@ -268,7 +268,7 @@ public final class PlaybackRegistry {
                 firstDurations(timeline.durations()), SessionTimeline.availableCount(order), order.size());
         if (restored) {
             LOGGER.info("playback session resumed pos={} elapsed={} rev={}", pos.toShortString(),
-                    timeline.elapsedTicks(now), session.revision);
+                    timeline.elapsedMillis(now), session.revision);
         }
         sendNearby(level, pos, session);
     }
@@ -314,7 +314,7 @@ public final class PlaybackRegistry {
 
     /** 通知附近客户端这个会话结束/暂停（active=false） 喵 */
     private static void sendStop(ServerLevel level, BlockPos pos, Session session) {
-        long elapsed = session.elapsedTicks(level);
+        long elapsed = session.elapsedMillis();
         for (ServerPlayer player : level.players()) {
             if (player.blockPosition().distSqr(pos) <= (double) session.range * session.range) {
                 SpeakerNetworking.sendToPlayer(player, new SpeakerPayloads.Playback(pos,
@@ -339,13 +339,13 @@ public final class PlaybackRegistry {
             return false;
         }
         Session session = map.get(pos);
-        if (session == null || !session.timeline.skipTrack(direction, level.getGameTime())) {
+        if (session == null || !session.timeline.skipTrack(direction, TimelineClock.nowMillis())) {
             return false;
         }
         session.revision = ++REVISION;
         sendNearby(level, pos, session);
         LOGGER.info("playback session skip pos={} dir={} elapsed={} rev={}", pos.toShortString(),
-                direction, session.elapsedTicks(level), session.revision);
+                direction, session.elapsedMillis(), session.revision);
         return true;
     }
 
@@ -353,22 +353,22 @@ public final class PlaybackRegistry {
      * 跳到当前曲目的指定进度（界面上点/拖进度条）。同样只平移时间轴，不碰 selected，
      * 所以不会重建会话、不会丢播放顺序和随机序。 喵
      *
-     * @param offsetTicks 曲内偏移（tick，0 = 本曲开头） 喵
+     * @param offsetMillis 曲内偏移（毫秒，0 = 本曲开头） 喵
      * @return 是否真的移动了（没有会话 / 时长未知时 false） 喵
      */
-    public static boolean seek(ServerLevel level, BlockPos pos, int offsetTicks) {
+    public static boolean seek(ServerLevel level, BlockPos pos, long offsetMillis) {
         Map<BlockPos, Session> map = ACTIVE.get(level.dimension());
         if (map == null) {
             return false;
         }
         Session session = map.get(pos);
-        if (session == null || !session.timeline.seekInCurrentTrack(offsetTicks, level.getGameTime())) {
+        if (session == null || !session.timeline.seekInCurrentTrack(offsetMillis, TimelineClock.nowMillis())) {
             return false;
         }
         session.revision = ++REVISION;
         sendNearby(level, pos, session);
-        LOGGER.info("playback session seek pos={} offsetTicks={} elapsed={} rev={}", pos.toShortString(),
-                offsetTicks, session.elapsedTicks(level), session.revision);
+        LOGGER.info("playback session seek pos={} offsetMillis={} elapsed={} rev={}", pos.toShortString(),
+                offsetMillis, session.elapsedMillis(), session.revision);
         return true;
     }
 
@@ -390,7 +390,7 @@ public final class PlaybackRegistry {
         if (parts == null || parts.isEmpty()) {
             return;   // 播放列表过大：宁可不发，也不能在服务端编码时抛异常 喵
         }
-        long elapsed = session.elapsedTicks(level);
+        long elapsed = session.elapsedMillis();
         int[] durations = session.timeline.durations();
         byte[] available = SessionTimeline.availabilityBits(session.timeline.order());
         for (int i = 0; i < parts.size(); i++) {

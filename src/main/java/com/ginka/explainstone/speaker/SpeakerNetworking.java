@@ -55,8 +55,8 @@ import java.util.function.Supplier;
  * 音频库位置：&lt;存档&gt;/explainstone/audio/&lt;sha1&gt;.ogg 喵
  */
 public final class SpeakerNetworking {
-    /** 网络协议版本（8：发信器全局音量 + 音量小包；旧客户端会被安全拒绝） 喵 */
-    private static final String PROTOCOL_VERSION = "9";
+    /** 网络协议版本（11：时间轴墙钟毫秒 + 频道收信音响列表；旧客户端会被安全拒绝） 喵 */
+    private static final String PROTOCOL_VERSION = "11";
     /** 界面操作的最大有效距离（格） 喵 */
     private static final double MAX_INTERACT_DISTANCE_SQ = 64 * 64;
 
@@ -199,6 +199,11 @@ public final class SpeakerNetworking {
         CHANNEL.registerMessage(10, SpeakerPayloads.AudioAvailability.class,
                 SpeakerPayloads.AudioAvailability::encode, SpeakerPayloads.AudioAvailability::decode,
                 SpeakerNetworking::handleAudioAvailability, Optional.of(NetworkDirection.PLAY_TO_CLIENT));
+
+        // 服务端 → 客户端：某频道所有收信音响的位置（客户端靠它一次性创建/起播全部 source） 喵
+        CHANNEL.registerMessage(11, SpeakerPayloads.ChannelSpeakers.class,
+                SpeakerPayloads.ChannelSpeakers::encode, SpeakerPayloads.ChannelSpeakers::decode,
+                SpeakerNetworking::handleChannelSpeakers, Optional.of(NetworkDirection.PLAY_TO_CLIENT));
     }
 
     public static void sendToPlayer(ServerPlayer player, Object message) {
@@ -351,6 +356,14 @@ public final class SpeakerNetworking {
         context.setPacketHandled(true);
     }
 
+    private static void handleChannelSpeakers(SpeakerPayloads.ChannelSpeakers payload,
+                                              Supplier<NetworkEvent.Context> ctx) {
+        NetworkEvent.Context context = ctx.get();
+        context.enqueueWork(() -> DistExecutor.unsafeRunWhenOn(Dist.CLIENT,
+                () -> () -> com.ginka.explainstone.client.ClientNetworkHandler.handleChannelSpeakers(payload)));
+        context.setPacketHandled(true);
+    }
+
     private static void handleBroadcastVolume(SpeakerPayloads.BroadcastVolume payload,
                                               Supplier<NetworkEvent.Context> ctx) {
         NetworkEvent.Context context = ctx.get();
@@ -403,16 +416,31 @@ public final class SpeakerNetworking {
                 setPlaying(level, pos, false);
                 be.stopTimer();
             }
-            case SpeakerPayloads.ACTION_SET_CHANNEL -> be.setChannel(payload.value());
+            case SpeakerPayloads.ACTION_SET_CHANNEL -> {
+                int channel = Math.floorMod(payload.value(), 1000);
+                if (be.isReceiveMode() && channel != be.getChannel() && !hasChannelRoom(level, channel, be)) {
+                    player.displayClientMessage(Component.translatable("message.explainstone.channel.full",
+                            ExplainstoneServerConfig.maxSpeakersPerChannel()), false);
+                } else {
+                    be.setChannel(channel);
+                }
+            }
             case SpeakerPayloads.ACTION_TOGGLE_RECEIVE -> {
-                be.setReceiveMode(!be.isReceiveMode());
-                // 收发模式切换时暂停状态作废：收信模式没有“暂停”，切回自播放也从停止态开始 喵
-                be.setPaused(false);
-                if (be.isReceiveMode()) {
-                    // 切到收信就停掉本机自播放：避免标题还显示"播放中"、红石输出也一直亮着 喵
-                    setPlaying(level, pos, false);
-                    be.stopTimer();
-                    PlaybackRegistry.stop(level, pos);
+                boolean wantReceive = !be.isReceiveMode();
+                if (wantReceive && !hasChannelRoom(level, be.getChannel(), be)) {
+                    // 频道的收信音响已经到上限：不切模式，直接告诉玩家 喵
+                    player.displayClientMessage(Component.translatable("message.explainstone.channel.full",
+                            ExplainstoneServerConfig.maxSpeakersPerChannel()), false);
+                } else {
+                    be.setReceiveMode(wantReceive);
+                    // 收发模式切换时暂停状态作废：收信模式没有“暂停”，切回自播放也从停止态开始 喵
+                    be.setPaused(false);
+                    if (be.isReceiveMode()) {
+                        // 切到收信就停掉本机自播放：避免标题还显示"播放中"、红石输出也一直亮着 喵
+                        setPlaying(level, pos, false);
+                        be.stopTimer();
+                        PlaybackRegistry.stop(level, pos);
+                    }
                 }
             }
             case SpeakerPayloads.ACTION_SET_TIMER -> be.setTimerSeconds(payload.value());
@@ -495,21 +523,32 @@ public final class SpeakerNetworking {
      * <p>和切歌一样只平移已有会话的时间轴，不动 selected；已停止（没有会话）时什么都不做，
      * 因为停止状态下本来就没有"进度"可言，下次播放仍从选中曲目开始。 喵
      *
-     * @param offsetTicks 曲内偏移（tick，0 = 本曲开头；服务端会按本曲长度夹住） 喵
+     * @param offsetMillis 曲内偏移（毫秒，0 = 本曲开头；服务端会按本曲长度夹住） 喵
      * @return 是否真的跳了 喵
      */
     private static boolean seekTrack(ServerLevel level, BlockPos pos, SpeakerBlockEntity be,
-                                     boolean transmitter, int offsetTicks) {
-        if (offsetTicks < 0) {
+                                     boolean transmitter, int offsetMillis) {
+        if (offsetMillis < 0) {
             return false;
         }
         if (transmitter) {
             // 正在广播但会话还没登记时，先登记再跳，否则这次点击会落空 喵
             BroadcastRegistry.refresh(level, pos, be);
-            return BroadcastRegistry.seek(level, pos, offsetTicks);
+            return BroadcastRegistry.seek(level, pos, offsetMillis);
         }
         PlaybackRegistry.ensure(level, pos, be);
-        return PlaybackRegistry.seek(level, pos, offsetTicks);
+        return PlaybackRegistry.seek(level, pos, offsetMillis);
+    }
+
+    /**
+     * 这个音响还能不能加入某个频道：频道里的收信音响数量是否还没到上限。
+     * 已经在这个频道里登记过的音响永远算"有位置"（不算新增）。 喵
+     */
+    private static boolean hasChannelRoom(ServerLevel level, int channel, SpeakerBlockEntity be) {
+        if (be.isSpeakerRegistered() && be.getChannel() == channel) {
+            return true;
+        }
+        return SpeakerRegistry.count(level, channel) < ExplainstoneServerConfig.maxSpeakersPerChannel();
     }
 
     /** 配置为「只有 OP 能广播」时，发信器的界面操作/预检/上传都只允许 OP 使用 喵 */

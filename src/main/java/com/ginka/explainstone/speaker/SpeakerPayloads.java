@@ -46,11 +46,11 @@ public final class SpeakerPayloads {
     public static final int ACTION_SET_BROADCAST_VOLUME = 16;
     /**
      * 上一曲 / 下一曲（value：负数 = 上一曲，正数 = 下一曲）。
-     * 只平移会话时间轴（elapsedTicks），不换选中曲目，所以不会中断/重置进度。 喵
+     * 只平移会话时间轴（已播放毫秒），不换选中曲目，所以不会中断/重置进度。 喵
      */
     public static final int ACTION_SKIP = 17;
     /**
-     * 跳转到指定进度（value = 当前曲目内的偏移 tick，0 = 本曲开头）。
+     * 跳转到指定进度（value = 当前曲目内的偏移毫秒，0 = 本曲开头）。
      * 同样只平移时间轴，不动选中曲目；点/拖进度条时由客户端发送。 喵
      */
     public static final int ACTION_SEEK = 18;
@@ -77,6 +77,8 @@ public final class SpeakerPayloads {
     public static final int MAX_PARTS = 512;
     /** 可用性位图的最大字节数（10000 首也只需要 1250 字节） 喵 */
     public static final int MAX_PLAYLIST_BITS_BYTES = 4096;
+    /** 一条 ChannelSpeakers 最多带多少个音响（和配置上限的硬上界一致） 喵 */
+    public static final int MAX_SPEAKERS_PER_MESSAGE = 256;
 
     private SpeakerPayloads() {
     }
@@ -297,7 +299,7 @@ public final class SpeakerPayloads {
      * 播放列表过大时会拆成 partCount 帧发送，partIndex 从 0 开始；durations 只在第 0 帧带。 喵
      */
     public record Broadcast(int channel, int mode, boolean active, boolean paused, String tracks,
-                            int[] durations, long elapsedTicks, long revision, int partIndex, int partCount,
+                            int[] durations, long elapsedMillis, long revision, int partIndex, int partCount,
                             int volume, byte[] available) {
         public void encode(FriendlyByteBuf buf) {
             buf.writeVarInt(this.channel);
@@ -306,7 +308,7 @@ public final class SpeakerPayloads {
             buf.writeBoolean(this.paused);
             buf.writeUtf(this.tracks == null ? "" : this.tracks, MAX_PART_CHARS);
             writeDurations(buf, this.durations);
-            buf.writeLong(this.elapsedTicks);
+            buf.writeLong(this.elapsedMillis);
             buf.writeLong(this.revision);
             buf.writeVarInt(this.partIndex);
             buf.writeVarInt(this.partCount);
@@ -339,11 +341,12 @@ public final class SpeakerPayloads {
 
     /**
      * 服务端 → 客户端：某个讲解石方块的本地播放会话。
-     * elapsedTicks 是发包时已经播放的游戏 tick 数，客户端再加本地经过的 tick 即可对齐；
+     * elapsedMillis 是发包时已经播放的毫秒数（服务端墙钟，按真实时间走），
+     * 客户端再叠加收到之后本地真实经过的时间即可对齐；
      * 播放列表过大时会拆成 partCount 帧发送，durations 只在第 0 帧带。 喵
      */
     public record Playback(BlockPos pos, int mode, boolean active, boolean paused, String tracks,
-                           int[] durations, long elapsedTicks, long revision, int partIndex, int partCount,
+                           int[] durations, long elapsedMillis, long revision, int partIndex, int partCount,
                            byte[] available) {
         public void encode(FriendlyByteBuf buf) {
             buf.writeBlockPos(this.pos);
@@ -352,7 +355,7 @@ public final class SpeakerPayloads {
             buf.writeBoolean(this.paused);
             buf.writeUtf(this.tracks == null ? "" : this.tracks, MAX_PART_CHARS);
             writeDurations(buf, this.durations);
-            buf.writeLong(this.elapsedTicks);
+            buf.writeLong(this.elapsedMillis);
             buf.writeLong(this.revision);
             buf.writeVarInt(this.partIndex);
             buf.writeVarInt(this.partCount);
@@ -380,6 +383,47 @@ public final class SpeakerPayloads {
         public static AudioChunk decode(FriendlyByteBuf buf) {
             return new AudioChunk(buf.readUtf(SHA1_LENGTH), buf.readUtf(MAX_LABEL_LENGTH),
                     buf.readVarInt(), buf.readVarInt(), buf.readByteArray(CHUNK_SIZE));
+        }
+    }
+
+    /**
+     * 服务端 → 客户端：某个频道所有**收信音响**的位置 / 音量 / 朝向。
+     *
+     * <p>客户端拿到它之后，就能在同一个 tick 里为整条频道创建并起播全部 source
+     * （同一次 alSourcePlayv → 同一个混音周期开始，这是"声学上同步"的根基）；
+     * 只靠扫描已加载区块是拿不到完整列表的（发信范围最大 512 格）。 喵
+     *
+     * <p>positions / volumes / facings 三个数组一一对应；facing 是 {@code Direction.ordinal()}。
+     */
+    public record ChannelSpeakers(int channel, long revision, long[] positions, int[] volumes, int[] facings) {
+        public void encode(FriendlyByteBuf buf) {
+            int count = this.positions == null ? 0 : this.positions.length;
+            buf.writeVarInt(this.channel);
+            buf.writeLong(this.revision);
+            buf.writeVarInt(count);
+            for (int i = 0; i < count; i++) {
+                buf.writeLong(this.positions[i]);
+                buf.writeVarInt(this.volumes == null || i >= this.volumes.length ? 100 : this.volumes[i]);
+                buf.writeByte(this.facings == null || i >= this.facings.length ? 2 : this.facings[i]);
+            }
+        }
+
+        public static ChannelSpeakers decode(FriendlyByteBuf buf) {
+            int channel = buf.readVarInt();
+            long revision = buf.readLong();
+            int count = buf.readVarInt();
+            if (count < 0 || count > MAX_SPEAKERS_PER_MESSAGE) {
+                throw new io.netty.handler.codec.DecoderException("ChannelSpeakers count out of range: " + count);
+            }
+            long[] positions = new long[count];
+            int[] volumes = new int[count];
+            int[] facings = new int[count];
+            for (int i = 0; i < count; i++) {
+                positions[i] = buf.readLong();
+                volumes[i] = buf.readVarInt();
+                facings[i] = buf.readByte();
+            }
+            return new ChannelSpeakers(channel, revision, positions, volumes, facings);
         }
     }
 }

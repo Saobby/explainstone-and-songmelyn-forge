@@ -70,6 +70,7 @@
   "message.explainstone.import.too_large": "文件太大（上限 %s MB）。",
   "message.explainstone.import.too_long": "音频太长（上限 %s 秒）。",
   "message.explainstone.import.playlist_full": "播放列表已满（最多 %s 首）。",
+  "message.explainstone.channel.full": "该频道的收信音响已达上限（%s 个）",
   "message.explainstone.import.sha_mismatch": "上传被拒绝：SHA-1 校验不一致。",
   "message.explainstone.import.failed": "保存音频失败。",
   "message.explainstone.import.busy": "上传请求太多，请稍后再试。",

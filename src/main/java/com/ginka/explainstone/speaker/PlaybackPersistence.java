@@ -69,11 +69,11 @@ public final class PlaybackPersistence {
 
     /**
      * 一条可恢复的播放会话：顺序用曲目 id 保存（label 从当前方块列表里重新取），
-     * elapsedTicks 是保存时已经播放的 tick 数（离线期间视为暂停）。 喵
+     * elapsedMillis 是保存时已经播放的**毫秒**（墙钟，离线期间视为暂停）。 喵
      */
     public record Saved(ResourceKey<Level> dimension, BlockPos pos, boolean broadcast, int channel,
                         int mode, int selected, List<String> sourceIds, List<String> orderIds,
-                        long elapsedTicks) {
+                        long elapsedMillis) {
 
         /** 当前方块的播放列表、模式、选中项是否和保存时一致 喵 */
         public boolean matches(List<Track> source, PlayMode mode, int selected) {
@@ -137,7 +137,11 @@ public final class PlaybackPersistence {
         }
         int mode = tag.getInt("mode");
         int selected = tag.getInt("selected");
-        long elapsed = tag.getLong("elapsed");
+        // 新格式存毫秒（elapsedMs）；老存档存的是 tick 数（elapsed），读的时候按 50ms/tick 换算，
+        // 这样升级模组后老世界的播放位置不会被打乱 喵
+        long elapsed = tag.contains("elapsedMs")
+                ? tag.getLong("elapsedMs")
+                : tag.getLong("elapsed") * 50L;
         if (mode < 0 || mode >= PlayMode.values().length || selected < 0 || elapsed < 0) {
             return null;
         }
@@ -244,7 +248,7 @@ public final class PlaybackPersistence {
                 tag.putInt("selected", saved.selected());
                 tag.put("source", writeIds(saved.sourceIds()));
                 tag.put("order", writeIds(saved.orderIds()));
-                tag.putLong("elapsed", saved.elapsedTicks());
+                tag.putLong("elapsedMs", saved.elapsedMillis());
                 list.add(tag);
             }
             CompoundTag root = new CompoundTag();

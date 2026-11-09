@@ -23,11 +23,13 @@ import java.util.Set;
 /**
  * 一个播放会话的时间轴（讲解石和广播发信器共用）。
  *
- * <p>它只保存元数据：固定播放顺序、每首的时长、起始游戏 tick、暂停快照。
+ * <p>它只保存元数据：固定播放顺序、每首的时长、起始墙钟毫秒、暂停快照。
+ * 时间轴上的位置量统一是**毫秒**（{@link TimelineClock}，按真实时间走，暂停即冻结），
+ * 每首的时长仍然以"秒"为单位（{@link Durations}），内部换算成毫秒。
  * 曲目列表变化时**按增量应用**，而不是整条重建：
  * <ul>
  *   <li>尾部追加（导入新歌）、改名、时长修正 → 保留时间轴，只换顺序/时长；</li>
- *   <li>删除当前曲目之前的曲目 → 把起始 tick 往前挪同样的时长，当前这首接着放；</li>
+ *   <li>删除当前曲目之前的曲目 → 把起始毫秒往前挪同样的时长，当前这首接着放；</li>
  *   <li>删除当前正在放的曲目、或者增删混在一起 → 只能重建（{@link Result#REBUILD}）。 喵</li>
  * </ul>
  */
@@ -53,18 +55,18 @@ public final class SessionTimeline {
     /** 播放列表分片：只在真的要下发时才编码（纯时间轴运算不需要它） 喵 */
     private List<String> parts;
     private boolean partsDirty = true;
-    private long startGameTime;
+    private long startMillis;
     private boolean paused;
-    private long pausedElapsed;
+    private long pausedElapsedMillis;
 
     public SessionTimeline(List<Track> sourceTracks, List<Track> order, int[] durations,
-                           long startGameTime, boolean paused, long pausedElapsed) {
+                           long startMillis, boolean paused, long pausedElapsedMillis) {
         this.sourceTracks = List.copyOf(sourceTracks);
         this.order = List.copyOf(order);
         this.durations = durations != null && durations.length == order.size() ? durations.clone() : new int[order.size()];
-        this.startGameTime = startGameTime;
+        this.startMillis = startMillis;
         this.paused = paused;
-        this.pausedElapsed = Math.max(0L, pausedElapsed);
+        this.pausedElapsedMillis = Math.max(0L, pausedElapsedMillis);
     }
 
     public List<Track> sourceTracks() {
@@ -92,37 +94,38 @@ public final class SessionTimeline {
         return this.paused;
     }
 
-    public long elapsedTicks(long nowGameTime) {
+    /** 时间轴上的"已播放时长"（毫秒）：按墙钟走，暂停时返回冻结值 喵 */
+    public long elapsedMillis(long nowMillis) {
         if (this.paused) {
-            return this.pausedElapsed;
+            return this.pausedElapsedMillis;
         }
-        return Math.max(0L, nowGameTime - this.startGameTime);
+        return Math.max(0L, nowMillis - this.startMillis);
     }
 
     /** 冻结时间轴；返回 true 表示状态真的变了（重复暂停不算） 喵 */
-    public boolean pause(long nowGameTime) {
+    public boolean pause(long nowMillis) {
         if (this.paused) {
             return false;
         }
-        this.pausedElapsed = this.elapsedTicks(nowGameTime);
+        this.pausedElapsedMillis = this.elapsedMillis(nowMillis);
         this.paused = true;
         return true;
     }
 
     /** 从暂停位置恢复（客户端仍然得到同一个 elapsed） 喵 */
-    public boolean resume(long nowGameTime) {
+    public boolean resume(long nowMillis) {
         if (!this.paused) {
             return false;
         }
-        this.startGameTime = nowGameTime - this.pausedElapsed;
+        this.startMillis = nowMillis - this.pausedElapsedMillis;
         this.paused = false;
         return true;
     }
 
     // ------------------------------------------------------------ 上一曲 / 下一曲 喵
 
-    /** 整条播放顺序的总时长（tick）；顺序为空或有任何一首时长未知就返回 0 喵 */
-    private long totalTicks() {
+    /** 整条播放顺序的总时长（毫秒）；顺序为空或有任何一首时长未知就返回 0 喵 */
+    private long totalMillis() {
         if (this.order.isEmpty() || this.durations.length != this.order.size()) {
             return 0L;
         }
@@ -131,7 +134,7 @@ public final class SessionTimeline {
             if (seconds <= 0) {
                 return 0L;   // 时长未知就没法算曲目边界，宁可不切 喵
             }
-            total += seconds * 20L;
+            total += seconds * 1_000L;
         }
         return total;
     }
@@ -139,7 +142,7 @@ public final class SessionTimeline {
     /**
      * 上一曲 / 下一曲：把整条时间轴往前或往后挪一首歌。
      *
-     * <p>会话只有「已播放 tick」这一个位置量（客户端按 elapsed % 总时长 定位曲目和偏移），
+     * <p>会话只有「已播放毫秒（墙钟）」这一个位置量（客户端按 elapsed % 总时长 定位曲目和偏移），
      * 所以切歌不需要改播放顺序，只要平移 elapsed：
      * <ul>
      *   <li>下一曲 = elapsed + 当前曲还没播的部分（正好落在下一首开头）；</li>
@@ -152,17 +155,17 @@ public final class SessionTimeline {
      * @param direction 负数 = 上一曲，正数 = 下一曲 喵
      * @return 是否真的移动了（顺序为空 / 时长未知时不动） 喵
      */
-    public boolean skipTrack(int direction, long nowGameTime) {
-        long total = this.totalTicks();
+    public boolean skipTrack(int direction, long nowMillis) {
+        long total = this.totalMillis();
         if (direction == 0 || total <= 0L) {
             return false;
         }
-        long elapsed = Math.floorMod(this.elapsedTicks(nowGameTime), total);
+        long elapsed = Math.floorMod(this.elapsedMillis(nowMillis), total);
         long acc = 0L;
         int index = -1;
         long offset = 0L;
         for (int i = 0; i < this.durations.length; i++) {
-            long length = this.durations[i] * 20L;
+            long length = this.durations[i] * 1_000L;
             if (elapsed < acc + length) {
                 index = i;
                 offset = elapsed - acc;
@@ -175,68 +178,68 @@ public final class SessionTimeline {
         }
         long target;
         if (direction > 0) {
-            target = elapsed + (this.durations[index] * 20L - offset);
+            target = elapsed + (this.durations[index] * 1_000L - offset);
         } else {
             int previous = Math.floorMod(index - 1, this.durations.length);
-            target = elapsed - offset - this.durations[previous] * 20L;
+            target = elapsed - offset - this.durations[previous] * 1_000L;
         }
         target = Math.floorMod(target, total);
         if (this.paused) {
-            this.pausedElapsed = target;
+            this.pausedElapsedMillis = target;
         } else {
-            this.startGameTime = nowGameTime - target;
+            this.startMillis = nowMillis - target;
         }
         return true;
     }
 
     /**
-     * 跳到当前曲目的第 {@code offsetTicks} 个 tick（点进度条 / 拖动进度条）。
+     * 跳到当前曲目的第 {@code offsetMillis} 毫秒（点进度条 / 拖动进度条）。
      *
-     * <p>和 {@link #skipTrack} 一样只改「已播放 tick」，不动 selected、不重建会话：
+     * <p>和 {@link #skipTrack} 一样只改「已播放毫秒」，不动 selected、不重建会话：
      * 先按当前时间轴定位出「当前曲目 + 它在时间轴上的起点」，再加上曲内偏移即可。
      * 暂停中同样有效（改暂停快照，恢复后从这里继续）。 喵
      *
-     * @param offsetTicks 曲内偏移（tick，0 = 本曲开头）；超出本曲长度会被夹住 喵
+     * @param offsetMillis 曲内偏移（毫秒，0 = 本曲开头）；超出本曲长度会被夹住 喵
      * @return 是否真的移动了（顺序为空 / 时长未知 / 偏移非法时 false） 喵
      */
-    public boolean seekInCurrentTrack(int offsetTicks, long nowGameTime) {
-        long total = this.totalTicks();
-        if (total <= 0L || offsetTicks < 0) {
+    public boolean seekInCurrentTrack(long offsetMillis, long nowMillis) {
+        long total = this.totalMillis();
+        if (total <= 0L || offsetMillis < 0) {
             return false;
         }
-        Located current = this.locate(this.elapsedTicks(nowGameTime));
+        Located current = this.locate(this.elapsedMillis(nowMillis));
         if (current == null) {
             return false;
         }
         long base = 0L;
         for (int i = 0; i < current.index(); i++) {
-            base += this.durations[i] * 20L;
+            base += this.durations[i] * 1_000L;
         }
-        long length = this.durations[current.index()] * 20L;
-        // 点到最右端时留在本曲最后一个 tick，而不是悄悄跳到下一首 喵
-        long offset = Math.min(offsetTicks, Math.max(0L, length - 1L));
+        long length = this.durations[current.index()] * 1_000L;
+        // 点到最右端时留在本曲最后一毫秒，而不是悄悄跳到下一首 喵
+        long offset = Math.min(offsetMillis, Math.max(0L, length - 1L));
         long target = Math.floorMod(base + offset, total);
         if (this.paused) {
-            this.pausedElapsed = target;
+            this.pausedElapsedMillis = target;
         } else {
-            this.startGameTime = nowGameTime - target;
+            this.startMillis = nowMillis - target;
         }
         return true;
     }
 
     /** 曲目列表变化时应用增量 喵 */
-    public Result apply(List<Track> newTracks, PlayMode mode, long nowGameTime, Durations durationSource) {
+    public Result apply(List<Track> newTracks, PlayMode mode, long nowMillis, Durations durationSource) {
         if (newTracks == null || newTracks.isEmpty()) {
             return Result.REBUILD;
         }
         if (sameIds(newTracks, this.sourceTracks)) {
-            return applyMetadata(newTracks, nowGameTime, durationSource);
+            return applyMetadata(newTracks, nowMillis, durationSource);
         }
         if (isPrefix(this.sourceTracks, newTracks)) {
-            return applyAppend(newTracks, mode, nowGameTime, durationSource);
+            return applyAppend(newTracks, mode, nowMillis, durationSource);
         }
         if (isSubsequence(newTracks, this.sourceTracks)) {
-            return applyRemoval(newTracks, nowGameTime, durationSource);
+            return applyRemoval(newTracks, nowMillis, durationSource);
         }
         return Result.REBUILD;
     }
@@ -244,14 +247,14 @@ public final class SessionTimeline {
     // ------------------------------------------------------------ 三种增量 喵
 
     /** 曲目集合没变：可能只是改名，也可能时长提示被真实值替换 喵 */
-    private Result applyMetadata(List<Track> newTracks, long nowGameTime, Durations durationSource) {
+    private Result applyMetadata(List<Track> newTracks, long nowMillis, Durations durationSource) {
         boolean labelsChanged = !newTracks.equals(this.sourceTracks);
         int[] updated = durationsFor(this.order, durationSource);
         boolean durationsChanged = !Arrays.equals(updated, this.durations);
         if (!labelsChanged && !durationsChanged) {
             return Result.UNCHANGED;
         }
-        Located old = locate(elapsedTicks(nowGameTime));
+        Located old = locate(elapsedMillis(nowMillis));
         this.sourceTracks = List.copyOf(newTracks);
         if (labelsChanged) {
             this.order = relabel(this.order, newTracks);
@@ -259,14 +262,14 @@ public final class SessionTimeline {
         this.durations = updated;
         this.partsDirty = true;
         if (old != null) {
-            retime(old, nowGameTime);
+            retime(old, nowMillis);
         }
         return Result.UPDATED;
     }
 
     /** 只是尾部追加了曲目（导入新歌）：把新曲目接在当前顺序后面 喵 */
-    private Result applyAppend(List<Track> newTracks, PlayMode mode, long nowGameTime, Durations durationSource) {
-        Located old = locate(elapsedTicks(nowGameTime));
+    private Result applyAppend(List<Track> newTracks, PlayMode mode, long nowMillis, Durations durationSource) {
+        Located old = locate(elapsedMillis(nowMillis));
         List<Track> added = new ArrayList<>(newTracks.subList(this.sourceTracks.size(), newTracks.size()));
         List<Track> newOrder = new ArrayList<>(this.order);
         if (mode == PlayMode.REPEAT_ONE) {
@@ -282,18 +285,18 @@ public final class SessionTimeline {
         this.durations = durationsFor(this.order, durationSource);
         this.partsDirty = true;
         if (old != null) {
-            retime(old, nowGameTime);
+            retime(old, nowMillis);
         }
         return Result.UPDATED;
     }
 
     /** 只删除了若干曲目：当前这首还活着就接着放，被删了就重建 喵 */
-    private Result applyRemoval(List<Track> newTracks, long nowGameTime, Durations durationSource) {
+    private Result applyRemoval(List<Track> newTracks, long nowMillis, Durations durationSource) {
         Set<String> keep = new HashSet<>();
         for (Track track : newTracks) {
             keep.add(track.id());
         }
-        Located old = locate(elapsedTicks(nowGameTime));
+        Located old = locate(elapsedMillis(nowMillis));
         if (old != null && !keep.contains(old.track().id())) {
             return Result.REBUILD;   // 正在放的那首被删了，只能重来 喵
         }
@@ -311,19 +314,19 @@ public final class SessionTimeline {
         this.durations = durationsFor(this.order, durationSource);
         this.partsDirty = true;
         if (old != null) {
-            // 删掉的是"当前曲目之前"的曲目时，这里会自动把起始 tick 往前挪，当前曲目不会跳 喵
-            retime(old, nowGameTime);
+            // 删掉的是"当前曲目之前"的曲目时，这里会自动把起始毫秒往前挪，当前曲目不会跳 喵
+            retime(old, nowMillis);
         }
         return Result.UPDATED;
     }
     // ------------------------------------------------------------ 工具 喵
 
-    /** 播放位置：当前曲目 + 曲内偏移（tick） 喵 */
-    private record Located(Track track, int index, long offsetTicks) {
+    /** 播放位置：当前曲目 + 曲内偏移（毫秒） 喵 */
+    private record Located(Track track, int index, long offsetMillis) {
     }
 
     /** 按旧顺序/旧时长定位；时长未知（0）时返回 null 表示"没法保证不跳"，调用方按原地保留处理 喵 */
-    private Located locate(long elapsedTicks) {
+    private Located locate(long elapsedMillis) {
         if (this.order.isEmpty()) {
             return null;
         }
@@ -332,15 +335,15 @@ public final class SessionTimeline {
             if (seconds <= 0) {
                 return null;
             }
-            total += seconds * 20L;
+            total += seconds * 1_000L;
         }
         if (total <= 0L) {
             return null;
         }
-        long pos = Math.floorMod(elapsedTicks, total);
+        long pos = Math.floorMod(elapsedMillis, total);
         long acc = 0L;
         for (int i = 0; i < this.order.size(); i++) {
-            long length = this.durations[i] * 20L;
+            long length = this.durations[i] * 1_000L;
             if (pos < acc + length) {
                 return new Located(this.order.get(i), i, pos - acc);
             }
@@ -353,22 +356,22 @@ public final class SessionTimeline {
      * 保持"这首歌听到第几秒"不变地重设时间轴：
      * 增删/改时长之后必须走这一步，否则客户端会跳到别的位置。 喵
      */
-    private void retime(Located old, long nowGameTime) {
+    private void retime(Located old, long nowMillis) {
         int index = indexOfId(this.order, old.track().id());
         if (index < 0) {
             return;
         }
         long base = 0L;
         for (int i = 0; i < index; i++) {
-            base += Math.max(0, this.durations[i]) * 20L;
+            base += Math.max(0, this.durations[i]) * 1_000L;
         }
-        long length = Math.max(0, this.durations[index]) * 20L;
-        long offset = Math.max(0L, Math.min(old.offsetTicks(), length));
+        long length = Math.max(0, this.durations[index]) * 1_000L;
+        long offset = Math.max(0L, Math.min(old.offsetMillis(), length));
         long elapsed = base + offset;
         if (this.paused) {
-            this.pausedElapsed = elapsed;
+            this.pausedElapsedMillis = elapsed;
         } else {
-            this.startGameTime = nowGameTime - elapsed;
+            this.startMillis = nowMillis - elapsed;
         }
     }
 

@@ -571,10 +571,10 @@ public class SpeakerScreen extends Screen {
             this.seekFraction = -1f;
             return;
         }
-        long durationTicks = Math.round(progress[1] * 20.0);
-        int offsetTicks = (int) Math.max(0L, Math.min(durationTicks,
-                Math.round(Math.max(0f, this.seekFraction) * durationTicks)));
-        send(SpeakerPayloads.ACTION_SEEK, offsetTicks);
+        long durationMillis = Math.round(progress[1] * 1000.0);
+        int offsetMillis = (int) Math.max(0L, Math.min(durationMillis,
+                Math.round(Math.max(0f, this.seekFraction) * durationMillis)));
+        send(SpeakerPayloads.ACTION_SEEK, offsetMillis);
         this.seekHoldUntil = System.currentTimeMillis() + 1500L;
     }
 

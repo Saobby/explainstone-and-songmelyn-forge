@@ -49,4 +49,9 @@ public final class ClientNetworkHandler {
     public static void handleAudioAvailability(SpeakerPayloads.AudioAvailability payload) {
         AudioSources.setServerAvailable(payload.sha1(), payload.available());
     }
+
+    /** 某频道的收信音响列表（位置/音量/朝向）：客户端靠它一次性创建并起播全部 source 喵 */
+    public static void handleChannelSpeakers(SpeakerPayloads.ChannelSpeakers payload) {
+        SpeakerAudio.onChannelSpeakers(payload);
+    }
 }

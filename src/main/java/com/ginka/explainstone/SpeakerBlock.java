@@ -15,6 +15,7 @@ package com.ginka.explainstone;
 import com.ginka.explainstone.speaker.AudioUsageRegistry;
 import com.ginka.explainstone.speaker.PlaybackRegistry;
 import com.ginka.explainstone.speaker.SpeakerBlockEntity;
+import com.ginka.explainstone.speaker.SpeakerRegistry;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.server.level.ServerLevel;
@@ -102,6 +103,8 @@ public class SpeakerBlock extends Block implements EntityBlock {
         return (lvl, pos, st, be) -> {
             if (lvl instanceof ServerLevel serverLevel && be instanceof SpeakerBlockEntity speaker) {
                 speaker.ensureAudioUsageRegistered();
+                // 收信音响登记表：让服务端知道"这个频道有哪些音响"，好一次性下发给客户端 喵
+                SpeakerRegistry.onBlockEntityTick(serverLevel, speaker);
                 PlaybackRegistry.tick(serverLevel, pos, st, speaker);
             }
         };
@@ -153,6 +156,8 @@ public class SpeakerBlock extends Block implements EntityBlock {
             PlaybackRegistry.stop(serverLevel, pos);
             // 方块没了 → 从这个音频的使用者列表里移除；没人用了就删存档里的文件 喵
             AudioUsageRegistry.update(serverLevel, pos, List.of());
+            // 也从收信音响登记表里移除（区块卸载不会走到这里，所以那里不会误删） 喵
+            SpeakerRegistry.unregister(serverLevel, pos);
         }
         super.onRemove(state, level, pos, newState, moved);
     }

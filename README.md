@@ -61,9 +61,10 @@ Port of the Fabric 1.21.1 edition of **Explainstone / Songmelyn / Broadcast Tran
 * Directional playback: decoded audio is mono-downmixed and positioned in the world,
   so the stereo image follows where the speaker actually is (turn around and left/right swap).
 * Server-authoritative synchronized playback: the server keeps a fixed playlist order and
-  start tick for every speaker / channel broadcast. Clients compute the current track and
-  offset from that timeline, so all players are in sync and leaving/re-entering range no
-  longer restarts the song.
+  a start time on a **wall clock in milliseconds** (so a lagging server clock cannot make the
+  timeline drift away from the audio) for every speaker / channel broadcast. Clients compute
+  the current track and offset from that timeline, so all players are in sync and
+  leaving/re-entering range no longer restarts the song.
 * Playlists larger than one network frame are split on track boundaries into parts of at
   most 64k characters (each part carries its index, total part count and the session
   revision). Clients reassemble the parts before applying the timeline; the periodic
@@ -99,14 +100,20 @@ Port of the Fabric 1.21.1 edition of **Explainstone / Songmelyn / Broadcast Tran
 * Audio decoding runs on a background thread. The first track of a session is decoded
   asynchronously (the voice starts a moment later instead of freezing the game), and the
   next track is pre-decoded while the current one plays, so track changes do not hitch.
-* Speakers on the same channel stay sample-aligned. A timeline jump (skip, progress-bar seek,
-  mode change) or a drift over 0.5 s re-aligns *every* voice of that group to the same computed
-  position, and the voices are additionally compared against each other every tick (a speaker
-  more than 80 ms away from the best-tracking one is pulled back). A voice that merely
-  (re)started — speakers are destroyed/recreated as chunks load in and out while you move — is
-  only corrected on its own, and only if it is more than 40 ms off: seeking the whole group on
-  every restart made the music sound like it was speeding up and slowing down.
-  `[sync] ...` lines in `logs/latest.log` report group realigns and any remaining measured spread.
+* Speakers on the same channel stay sample-aligned, because the server keeps a **registry of
+  receiving speakers per channel** (`<world>/explainstone/speakers.nbt`, maintained from the
+  block ticker, block removal, channel/mode changes; chunk unload keeps the entry) and sends
+  that whole list to clients. The client creates an OpenAL source for *every* speaker of the
+  channel and starts them all in a single `alSourcePlayv`, so they begin in the same mixer
+  cycle; speakers outside their audible range keep playing at gain 0 (pausing would freeze
+  their position) and skip occlusion/room/reverb work. A timeline jump (skip, progress-bar
+  seek, mode change) restarts the whole group onto the same target, which keeps them in sync
+  by construction. When a speaker is **added** to a channel, the client throws away every
+  source of that channel and recreates them in one tick (a single audible hiccup, but they
+  all start in the same mixer cycle again); volume or facing changes never rebuild anything.
+  Corrections are no longer driven by reading `AL_SEC_OFFSET` back: that
+  readout is only accurate to a few dozen milliseconds, and chasing it made things worse.
+  The number of speakers per channel is capped by `maxSpeakersPerChannel` (server config).
 * One volume slider controls both loudness and audible range:
   `effective range = audibleRangeAtFullVolume × volume / 100`. Setting it to 0 mutes the
   speaker, so there is no separate sound on/off toggle. Local playback vs. receive mode is

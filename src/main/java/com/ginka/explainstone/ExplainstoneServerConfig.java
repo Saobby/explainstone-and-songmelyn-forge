@@ -42,6 +42,18 @@ public final class ExplainstoneServerConfig {
                     "Synced to clients automatically, so both sides always agree.")
             .defineInRange("audibleRangeAtFullVolume", 40, 8, 256);
 
+    /**
+     * 一个频道最多允许多少个收信音响。
+     *
+     * <p>同频道的音响会在客户端**同时**创建并起播（这样它们必然同步），
+     * 所以需要一个上限，避免有人布几百个音响把客户端混音和内存拖垮。 喵
+     */
+    public static final ForgeConfigSpec.IntValue MAX_SPEAKERS_PER_CHANNEL = BUILDER
+            .comment("Maximum number of receiving speakers per channel.",
+                    "All speakers of a channel are started together on the client (that is what keeps",
+                    "them in sync), so this bounds the number of OpenAL sources one channel may use.")
+            .defineInRange("maxSpeakersPerChannel", 64, 1, 256);
+
     /** 单个导入音频文件大小上限（MB） 喵 */
     public static final ForgeConfigSpec.IntValue MAX_AUDIO_FILE_MB = BUILDER
             .comment("Maximum size of an imported ogg file in MiB.",
@@ -141,6 +153,15 @@ public final class ExplainstoneServerConfig {
         } catch (RuntimeException e) {
             // 服务端配置还没同步到客户端（正常不会发生）时给个安全默认值，别让渲染线程崩 喵
             return 40;
+        }
+    }
+
+    /** 一个频道最多允许多少个收信音响（客户端也用它做本地 source 上限兜底） 喵 */
+    public static int maxSpeakersPerChannel() {
+        try {
+            return MAX_SPEAKERS_PER_CHANNEL.get();
+        } catch (RuntimeException e) {
+            return 64;
         }
     }
 

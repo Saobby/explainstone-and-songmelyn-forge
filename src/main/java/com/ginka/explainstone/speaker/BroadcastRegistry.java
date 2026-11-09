@@ -31,7 +31,7 @@ import java.util.Map;
 /**
  * 服务端广播登记表：记录每个世界里正在广播的发信器。
  * 和讲解石的本地播放一样，这里保存「固定播放顺序 + 起始游戏 tick」，
- * 收信端自己按 elapsedTicks 计算当前曲目与偏移，保证全服进度一致。 喵
+ * 收信端自己按 elapsedMillis 计算当前曲目与偏移，保证全服进度一致。 喵
  */
 public final class BroadcastRegistry {
     /** 默认信号传播距离（格），实际用每个发信器的 transmitRange 喵 */
@@ -62,6 +62,8 @@ public final class BroadcastRegistry {
         long lastSentMs = System.currentTimeMillis();
         /** 上次同步时的音频仓库版本：变了就重发一次（有人上传完/文件被回收） 喵 */
         long availabilityVersion = AudioStore.version();
+        /** 上次同步时的"收信音响列表"代号：有人在频道里加/减/改音响就重发一次 喵 */
+        long speakerRevision = -1L;
 
         private Entry(int channel, int selected, PlayMode mode, SessionTimeline timeline,
                       long revision, int range, int volume) {
@@ -74,8 +76,8 @@ public final class BroadcastRegistry {
             this.volume = volume;
         }
 
-        private long elapsedTicks(ServerLevel level) {
-            return this.timeline.elapsedTicks(level.getGameTime());
+        private long elapsedMillis() {
+            return this.timeline.elapsedMillis(TimelineClock.nowMillis());
         }
     }
 
@@ -96,7 +98,7 @@ public final class BroadcastRegistry {
         Entry existing = map.get(pos);
         int range = Math.max(32, Math.min(512, be.getTransmitRange()));
         int volume = Math.max(0, Math.min(100, be.getBroadcastVolume()));
-        long now = level.getGameTime();
+        long now = TimelineClock.nowMillis();
         if (paused) {
             if (existing != null && existing.channel == channel
                     && existing.selected == selected && existing.mode == mode) {
@@ -108,6 +110,11 @@ public final class BroadcastRegistry {
                 if (result == SessionTimeline.Result.UPDATED
                         || existing.availabilityVersion != AudioStore.version()) {
                     existing.availabilityVersion = AudioStore.version();
+                    changed = true;
+                }
+                long speakerRevision = SpeakerRegistry.revision(level, channel);
+                if (existing.speakerRevision != speakerRevision) {
+                    existing.speakerRevision = speakerRevision;
                     changed = true;
                 }
                 if (result == SessionTimeline.Result.REBUILD) {
@@ -123,7 +130,7 @@ public final class BroadcastRegistry {
                         existing.lastSentMs = nowMs;
                         sendEntry(level, pos, existing);
                         LOGGER.info("broadcast session paused pos={} ch={} elapsed={} rev={}",
-                                pos.toShortString(), channel, existing.elapsedTicks(level), existing.revision);
+                                pos.toShortString(), channel, existing.elapsedMillis(), existing.revision);
                     } else if (nowMs - existing.lastSentMs >= 5000L) {
                         // 暂停期间每 5 秒重发一次，收信端进度条不会因为太久没更新被丢掉 喵
                         existing.lastSentMs = nowMs;
@@ -170,6 +177,11 @@ public final class BroadcastRegistry {
                     existing.availabilityVersion = AudioStore.version();
                     changed = true;
                 }
+                long speakerRevision = SpeakerRegistry.revision(level, channel);
+                if (existing.speakerRevision != speakerRevision) {
+                    // 频道的收信音响列表变了（有人加/减/调音量）：立刻重推，别等 5 秒 喵
+                    changed = true;
+                }
                 long nowMs = System.currentTimeMillis();
                 if (!changed) {
                     // 什么都没变，但发信器的 ticker 只会每 5 秒调一次这里！
@@ -178,15 +190,18 @@ public final class BroadcastRegistry {
                         return;
                     }
                     existing.lastSentMs = nowMs;
+                    existing.speakerRevision = speakerRevision;
                     sendEntry(level, pos, existing);
                     return;
                 }
                 if (!resumed && nowMs - existing.lastSentMs < 1000L) {
-                    // 节流：防止连续刷界面操作放大成大量重推 喵
+                    // 节流：这次不重推，但**不更新** speakerRevision/availabilityVersion，
+                    // 下一次 refresh 还会认为"有变化"，不会把这次变更吞掉 喵
                     return;
                 }
                 existing.lastSentMs = nowMs;
                 existing.revision = ++REVISION;
+                existing.speakerRevision = speakerRevision;
                 sendEntry(level, pos, existing);
                 LOGGER.info("broadcast session {} pos={} ch={} order={} paused={} rev={}",
                         resumed ? "resumed" : "updated", pos.toShortString(), channel,
@@ -209,32 +224,33 @@ public final class BroadcastRegistry {
         if (order != null && (!saved.matches(tracks, mode, selected) || saved.channel() != channel)) {
             order = null;
         }
-        long startGameTime = level.getGameTime();
-        long pausedElapsed = 0L;
+        long startMillis = TimelineClock.nowMillis();
+        long pausedElapsedMillis = 0L;
         boolean restored = order != null;
         if (order == null) {
             order = PlaybackRegistry.buildOrder(tracks, mode, selected);
         } else {
-            pausedElapsed = Math.max(0L, saved.elapsedTicks());
-            startGameTime -= pausedElapsed;
+            pausedElapsedMillis = Math.max(0L, saved.elapsedMillis());
+            startMillis -= pausedElapsedMillis;
         }
         if (order.isEmpty()) {
             map.remove(pos);
             return;
         }
         SessionTimeline timeline = new SessionTimeline(tracks, order,
-                SpeakerNetworking.trackDurations(level, be, order), startGameTime, paused, pausedElapsed);
+                SpeakerNetworking.trackDurations(level, be, order), startMillis, paused, pausedElapsedMillis);
         if (timeline.parts() == null) {
             LOGGER.warn("广播列表无法下发，pos={}（{} 首，编码 {} 字符）",
                     pos.toShortString(), order.size(), SessionTimeline.encode(order).length());
         }
         Entry entry = new Entry(channel, selected, mode, timeline, ++REVISION, range, volume);
+        entry.speakerRevision = SpeakerRegistry.revision(level, channel);
         map.put(pos.immutable(), entry);
         LOGGER.info("broadcast session {} pos={} ch={} mode={} order={} rev={}",
                 paused ? "paused" : "start", pos.toShortString(), channel, mode, order.size(), entry.revision);
         if (restored) {
             LOGGER.info("broadcast session resumed pos={} ch={} elapsed={} rev={}", pos.toShortString(),
-                    channel, timeline.elapsedTicks(level.getGameTime()), entry.revision);
+                    channel, timeline.elapsedMillis(TimelineClock.nowMillis()), entry.revision);
         }
         sendEntry(level, pos, entry);
     }
@@ -252,14 +268,14 @@ public final class BroadcastRegistry {
             return false;
         }
         Entry entry = map.get(pos);
-        if (entry == null || !entry.timeline.skipTrack(direction, level.getGameTime())) {
+        if (entry == null || !entry.timeline.skipTrack(direction, TimelineClock.nowMillis())) {
             return false;
         }
         entry.revision = ++REVISION;
         entry.lastSentMs = System.currentTimeMillis();
         sendEntry(level, pos, entry);
         LOGGER.info("broadcast session skip pos={} ch={} dir={} elapsed={} rev={}", pos.toShortString(),
-                entry.channel, direction, entry.elapsedTicks(level), entry.revision);
+                entry.channel, direction, entry.elapsedMillis(), entry.revision);
         return true;
     }
 
@@ -267,23 +283,23 @@ public final class BroadcastRegistry {
      * 跳到当前曲目的指定进度（发信器界面上点/拖进度条），并立刻重推给收信端。
      * 只平移时间轴、不动 selected，避免 refresh() 当成换曲重建。 喵
      *
-     * @param offsetTicks 曲内偏移（tick，0 = 本曲开头） 喵
+     * @param offsetMillis 曲内偏移（毫秒，0 = 本曲开头） 喵
      * @return 是否真的移动了（没有广播会话 / 时长未知时 false） 喵
      */
-    public static boolean seek(ServerLevel level, BlockPos pos, int offsetTicks) {
+    public static boolean seek(ServerLevel level, BlockPos pos, long offsetMillis) {
         Map<BlockPos, Entry> map = ACTIVE.get(level.dimension());
         if (map == null) {
             return false;
         }
         Entry entry = map.get(pos);
-        if (entry == null || !entry.timeline.seekInCurrentTrack(offsetTicks, level.getGameTime())) {
+        if (entry == null || !entry.timeline.seekInCurrentTrack(offsetMillis, TimelineClock.nowMillis())) {
             return false;
         }
         entry.revision = ++REVISION;
         entry.lastSentMs = System.currentTimeMillis();
         sendEntry(level, pos, entry);
-        LOGGER.info("broadcast session seek pos={} ch={} offsetTicks={} elapsed={} rev={}",
-                pos.toShortString(), entry.channel, offsetTicks, entry.elapsedTicks(level), entry.revision);
+        LOGGER.info("broadcast session seek pos={} ch={} offsetMillis={} elapsed={} rev={}",
+                pos.toShortString(), entry.channel, offsetMillis, entry.elapsedMillis(), entry.revision);
         return true;
     }
 
@@ -314,7 +330,7 @@ public final class BroadcastRegistry {
                         session.channel, session.mode.ordinal(), session.selected,
                         PlaybackPersistence.trackIds(session.timeline.sourceTracks()),
                         PlaybackPersistence.trackIds(session.timeline.order()),
-                        session.elapsedTicks(level)));
+                        session.elapsedMillis()));
             }
         }
         return out;
@@ -345,7 +361,7 @@ public final class BroadcastRegistry {
         for (Entry entry : map.values()) {
             for (ServerPlayer player : level.players()) {
                 SpeakerNetworking.sendToPlayer(player, new SpeakerPayloads.Broadcast(
-                        entry.channel, 0, false, false, "", new int[0], entry.elapsedTicks(level),
+                        entry.channel, 0, false, false, "", new int[0], entry.elapsedMillis(),
                         entry.revision, 0, 1, entry.volume, new byte[0]));
             }
         }
@@ -365,7 +381,11 @@ public final class BroadcastRegistry {
         if (parts == null || parts.isEmpty()) {
             return;   // 列表过大：不下发，避免服务端编码异常 喵
         }
-        long elapsed = entry.elapsedTicks(level);
+        // 先把这个频道的收信音响列表发下去：客户端靠它一次性创建并起播该频道的全部 source 喵
+        SpeakerRegistry.Snapshot speakers = SpeakerRegistry.snapshot(level, entry.channel);
+        SpeakerNetworking.sendToPlayer(player, new SpeakerPayloads.ChannelSpeakers(entry.channel,
+                speakers.revision(), speakers.positions(), speakers.volumes(), speakers.facings()));
+        long elapsed = entry.elapsedMillis();
         int[] durations = entry.timeline.durations();
         byte[] available = SessionTimeline.availabilityBits(entry.timeline.order());
         for (int i = 0; i < parts.size(); i++) {
@@ -393,7 +413,7 @@ public final class BroadcastRegistry {
     }
 
     private static void stopEntry(ServerLevel level, BlockPos pos, Entry entry) {
-        long elapsed = entry.elapsedTicks(level);
+        long elapsed = entry.elapsedMillis();
         for (ServerPlayer player : level.players()) {
             if (player.blockPosition().distSqr(pos) <= (double) entry.range * entry.range) {
                 SpeakerNetworking.sendToPlayer(player, new SpeakerPayloads.Broadcast(

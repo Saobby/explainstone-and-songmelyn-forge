@@ -16,6 +16,7 @@ import com.ginka.explainstone.Explainstone;
 import com.ginka.explainstone.client.audio.AudioSources;
 import com.ginka.explainstone.client.audio.SpeakerAudio;
 import com.ginka.explainstone.client.audio.SpeakerUploader;
+import com.ginka.explainstone.speaker.TimelineClock;
 import net.minecraft.client.Minecraft;
 import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.client.event.ClientPlayerNetworkEvent;
@@ -32,8 +33,12 @@ public final class ClientEventHandlers {
     @SubscribeEvent
     public static void onClientTick(TickEvent.ClientTickEvent event) {
         if (event.phase == TickEvent.Phase.END) {
-            SpeakerUploader.tick(Minecraft.getInstance());
-            SpeakerAudio.tick(Minecraft.getInstance());
+            Minecraft client = Minecraft.getInstance();
+            // 单人暂停（Esc）期间集成服务器不 tick，时间轴要跟着冻结：
+            // 这里每 tick 把"是不是暂停中"告诉时间轴墙钟（专用服务器没有暂停，这里永远是 false） 喵
+            TimelineClock.onGamePaused(client.isPaused());
+            SpeakerUploader.tick(client);
+            SpeakerAudio.tick(client);
         }
     }
 

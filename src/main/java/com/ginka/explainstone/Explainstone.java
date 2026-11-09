@@ -19,6 +19,8 @@ import com.ginka.explainstone.speaker.PendingImports;
 import com.ginka.explainstone.speaker.PlaybackPersistence;
 import com.ginka.explainstone.speaker.PlaybackRegistry;
 import com.ginka.explainstone.speaker.SpeakerNetworking;
+import com.ginka.explainstone.speaker.SpeakerRegistry;
+import com.ginka.explainstone.speaker.TimelineClock;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.item.CreativeModeTabs;
@@ -105,8 +107,10 @@ public class Explainstone {
 	public void onServerAboutToStart(ServerAboutToStartEvent event) {
 		// 世界加载前先读「音频 → 音响」引用表和上次的播放进度 喵
 		// 音频仓库也要先扫一遍：可用性索引是播放列表位图的唯一来源 喵
+		TimelineClock.reset();
 		AudioStore.load(event.getServer());
 		AudioUsageRegistry.load(event.getServer());
+		SpeakerRegistry.load(event.getServer());
 		PlaybackPersistence.load(event.getServer());
 	}
 
@@ -117,11 +121,14 @@ public class Explainstone {
 		PlaybackPersistence.clear();
 		PlaybackRegistry.clear();
 		BroadcastRegistry.clear();
+		SpeakerRegistry.save();
+		SpeakerRegistry.clear();
 		SpeakerNetworking.clearUploads();
 		AudioUsageRegistry.save();
 		AudioUsageRegistry.clear();
 		PendingImports.clear();
 		AudioStore.clear();
+		TimelineClock.reset();
 	}
 
 	@SubscribeEvent
@@ -131,8 +138,9 @@ public class Explainstone {
 			SpeakerNetworking.cleanupUploads();
 			// 待上传条目超时就从播放列表里摘掉（防止元数据垃圾永久挂着） 喵
 			PendingImports.tick(event.getServer());
-			// 每 5 秒写一次播放进度，崩溃时最多丢 5 秒 喵
+			// 每 5 秒写一次播放进度 / 收信音响登记表，崩溃时最多丢 5 秒 喵
 			PlaybackPersistence.save();
+			SpeakerRegistry.save();
 		}
 	}
 
