@@ -14,6 +14,7 @@ package com.ginka.explainstone;
 
 import net.minecraftforge.common.ForgeConfigSpec;
 
+import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -76,6 +77,14 @@ public final class ExplainstoneClientConfig {
      * 导入音频时默认用哪种文件选择框。
      * system  = 系统原生对话框（Linux 上 zenity/qarma/kdialog，其它平台 AWT），开不出来就自动退到游戏内浏览器；
      * in-game = 直接用游戏内文件浏览器（方便在任意平台测试它） 喵
+     *
+     * <p><b>注意：这里的候选值必须传可变集合（{@code new ArrayList<>(...) }），不能传 {@code List.of(...)}。</b>
+     * Forge 47.2.x 在配置文件里**缺少这个键**（例如从旧版本升级上来、旧 toml 里还没有 filePicker）时，
+     * 会走 {@code ValueSpec.test(null)} → {@code allowedValues.contains(null)}；而 {@code List.of()} 是
+     * 不可变列表，{@code contains(null)} 会抛 NPE（{@code Objects.requireNonNull}）。
+     * 这个异常会从 {@code ConfigTracker.loadConfigs} 一路冒到资源重载，游戏提示"资源加载失败"
+     * 并**禁用整合包的全部资源包**。{@code ArrayList} 的 {@code contains(null)} 返回 false，
+     * Forge 就会老老实实把缺失的键补成默认值。 喵
      */
     public static final ForgeConfigSpec.ConfigValue<String> FILE_PICKER = BUILDER
             .comment("Which file picker the \"Import ogg…\" button opens.",
@@ -83,7 +92,7 @@ public final class ExplainstoneClientConfig {
                     "          If no system dialog can be created, the in-game file browser is used instead.",
                     "in-game - always use the in-game file browser (handy for testing on any platform).",
                     "Values: system, in-game. Client-side only.")
-            .defineInList("filePicker", "system", List.of("system", "in-game"));
+            .defineInList("filePicker", "system", new ArrayList<>(List.of("system", "in-game")));
 
     // ------------------------------------------------------------ 表现与资源上限 喵
     /** 音符粒子的距离上限（格）：更远的音响不冒粒子（纯渲染上限，不影响听觉） 喵 */
