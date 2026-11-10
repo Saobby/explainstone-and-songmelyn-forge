@@ -158,8 +158,12 @@ public final class SpeakerAudio {
      * 与玩家听到的声音大小无关（玩家听到的还要乘距离衰减和全局音量）。 喵
      */
     private static int notesThisTick;
-    /** 音量 100% 时每 tick 每座音响的音符数：音量越小越稀（线性缩放），小数部分按概率补 喵 */
-    private static final double NOTES_PER_TICK_AT_FULL_VOLUME = 2.0;
+    /**
+     * 音量 100% 时每 tick 每座音响的音符数：音量越小越稀（线性缩放），小数部分按概率补。
+     *
+     * <p>0.5 = 每秒约 10 颗（20 TPS），和加这个功能之前的手感基本一致；再往上调会显得糊。 喵
+     */
+    private static final double NOTES_PER_TICK_AT_FULL_VOLUME = 0.5;
 
     /** 界面操作被拒绝时的提示：坐标 → {截止时间, 上限}；音响界面读取后自己显示，不进聊天栏 喵 */
     private static final Map<BlockPos, long[]> CHANNEL_FULL_NOTICES = new HashMap<>();

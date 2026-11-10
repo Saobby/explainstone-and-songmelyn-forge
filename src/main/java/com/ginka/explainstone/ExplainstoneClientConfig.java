@@ -96,8 +96,8 @@ public final class ExplainstoneClientConfig {
     public static final ForgeConfigSpec.IntValue NOTES_PER_TICK_BUDGET = BUILDER
             .comment("Hard cap on note particles spawned per tick for this client.",
                     "Speakers that do not fit in the budget simply skip their particles for that tick.",
-                    "Default 128 = one full default channel (64 speakers x 2 notes at 100% volume).",
-                    "Lower it if a dense cluster of loud speakers costs you frames.")
+                    "Each speaker emits 0.5 notes/tick at 100% volume, so the default 128 covers",
+                    "256 speakers at full volume. Lower it if a dense cluster costs you frames.")
             .defineInRange("notesPerTickBudget", 128, 0, 2000);
 
     /** 本机同时最多保留多少个 OpenAL 音源 喵 */

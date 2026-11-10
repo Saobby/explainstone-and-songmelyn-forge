@@ -123,11 +123,11 @@ Port of the Fabric 1.21.1 edition of **Explainstone / Songmelyn / Broadcast Tran
 * Note particles float above a speaker while **it** is emitting sound (its own volume > 0),
   not while *you* can hear it: the transmitter's global volume and distance attenuation change
   how loud it reaches you, but not whether it is playing. The **number** of notes scales with
-  that same volume — at 100 % a speaker emits a steady stream, at 20 % it only now and then
-  drops a single note — and only speakers within 48 blocks spawn particles, purely to avoid
+  that same volume — at 100 % a speaker emits about 10 notes per second, at 20 % only one every
+  few seconds — and only speakers within 48 blocks spawn particles, purely to avoid
   wasting render work on far-away ones. A per-tick budget (128 notes for the whole client by
-  default — enough for one full default channel of 64 speakers at 100 %) keeps a dense cluster
-  of loud speakers from flooding the screen; lower it if that ever costs you frames.
+  default, i.e. 256 speakers at full volume) keeps a dense cluster of loud speakers from
+  flooding the screen; lower it if that ever costs you frames.
 * One volume slider controls both loudness and audible range:
   `effective range = audibleRangeAtFullVolume × volume / 100`. Setting it to 0 mutes the
   speaker, so there is no separate sound on/off toggle. Local playback vs. receive mode is
